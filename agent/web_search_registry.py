@@ -121,6 +121,7 @@ def _read_config_key(*path: str) -> Optional[str]:
 # we don't surface a provider the user has no credentials for.
 _LEGACY_PREFERENCE = (
     "firecrawl",
+    "trafilatura",
     "parallel",
     "tavily",
     "exa",
