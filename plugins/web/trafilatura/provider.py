@@ -217,15 +217,19 @@ class TrafilaturaExtractProvider(WebSearchProvider):
         if text is None:
             return {"url": url, "error": "no main content found (likely JS-rendered page)"}
 
-        # Get metadata
+        # Get metadata — strip lxml _Element fields that break JSON serialization
         raw_metadata = trafilatura.extract_metadata(response.content)
         # extract_metadata can return a Document object or dict
         if hasattr(raw_metadata, 'as_dict'):
-            metadata = raw_metadata.as_dict() or {}
+            full_metadata = raw_metadata.as_dict() or {}
         elif isinstance(raw_metadata, dict):
-            metadata = raw_metadata
+            full_metadata = raw_metadata
         else:
-            metadata = {}
+            full_metadata = {}
+
+        # Remove lxml _Element objects (body, commentsbody) — not JSON-serializable
+        _LXML_FIELDS = frozenset({"body", "commentsbody"})
+        metadata = {k: v for k, v in full_metadata.items() if k not in _LXML_FIELDS}
 
         title = metadata.get("title", "") or ""
 
