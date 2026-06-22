@@ -301,12 +301,20 @@ def _get_capability_backend(capability: str) -> str:
     """Shared helper for per-capability backend selection.
 
     Reads ``web.{capability}_backend`` from config; if set and available,
-    uses it. Otherwise falls through to the shared ``_get_backend()``.
+    uses it. For extract, if no config is set and trafilatura is importable,
+    defaults to trafilatura (local, free, no API key needed). Otherwise
+    falls through to the shared ``_get_backend()``.
     """
     cfg = _load_web_config()
     specific = (cfg.get(f"{capability}_backend") or "").lower().strip()
     if specific and _is_backend_available(specific):
         return specific
+
+    # Trafilatura is the preferred default extract backend when no explicit
+    # config is set — it's local, free, and needs no API key.
+    if capability == "extract" and _is_backend_available("trafilatura"):
+        return "trafilatura"
+
     return _get_backend()
 
 
@@ -1166,6 +1174,10 @@ async def web_extract_tool(
             results = [by_index[index] for index in range(len(urls))]
 
 
+        # Capture which provider actually served (may differ from backend if
+        # fallback kicked in during per-URL retry)
+        actual_provider = provider.name if provider else "unknown"
+        
         response = {"results": results}
         
         pages_extracted = len(response.get('results', []))
@@ -1217,7 +1229,10 @@ async def web_extract_tool(
             }
             for r in response.get("results", [])
         ]
-        trimmed_response = {"results": trimmed_results}
+        trimmed_response = {
+            "provider": actual_provider,
+            "results": trimmed_results,
+        }
 
         if trimmed_response.get("results") == []:
             result_json = tool_error("Content was inaccessible or not found")
