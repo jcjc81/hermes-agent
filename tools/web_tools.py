@@ -41,7 +41,9 @@ import logging
 import os
 import re
 import asyncio
+import inspect
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
+from urllib.parse import urlparse
 import httpx  # noqa: F401 — kept at module top so tests can patch tools.web_tools.httpx
 # After the web-provider plugin migration (PR #25182), the Firecrawl SDK
 # proxy, client construction, and response-shape normalizers all live in
@@ -365,6 +367,7 @@ def _ddgs_package_importable() -> bool:
         return True
     except ImportError:
         return False
+
 
 # ─── Firecrawl Client ────────────────────────────────────────────────────────
 
@@ -722,6 +725,46 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             )
             response_data = provider.search(query, limit)
 
+            # If the primary provider failed at runtime (e.g. out of credits,
+            # API error), walk the remaining available providers in legacy
+            # preference order and try each one until one succeeds.
+            if not response_data.get("success", True):
+                from agent.web_search_registry import (
+                    _LEGACY_PREFERENCE,
+                    get_provider as _wsp_get_provider2,
+                )
+                primary_error = response_data.get("error", "unknown error")
+                logger.warning(
+                    "Web search provider '%s' failed ('%s'), trying fallback providers",
+                    provider.name, primary_error,
+                )
+                for fallback_name in _LEGACY_PREFERENCE:
+                    if fallback_name == provider.name:
+                        continue
+                    fallback = _wsp_get_provider2(fallback_name)
+                    if fallback is None or not fallback.supports_search():
+                        continue
+                    try:
+                        avail = fallback.is_available()
+                    except Exception:
+                        avail = False
+                    if not avail:
+                        continue
+                    logger.info(
+                        "Web search fallback: trying '%s'", fallback_name,
+                    )
+                    fallback_data = fallback.search(query, limit)
+                    if fallback_data.get("success", True):
+                        logger.info(
+                            "Web search fallback '%s' succeeded", fallback_name,
+                        )
+                        response_data = fallback_data
+                        break
+                    logger.warning(
+                        "Web search fallback '%s' also failed: %s",
+                        fallback_name, fallback_data.get("error", "?"),
+                    )
+
         debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
         result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
         debug_call_data["final_response_size"] = len(result_json)
@@ -943,9 +986,168 @@ async def web_extract_tool(
                     provider.extract, safe_urls, format=format
                 )
 
+            # Per-URL fallback: if any URL failed, retry only those on
+            # remaining extract-capable providers. This avoids re-extracting
+            # URLs the primary already got (saves credits) and handles mixed
+            # batches (static + JS pages) where the old all-or-nothing path
+            # would silently drop the JS pages.
+            #
+            # Merge is anchored by list INDEX into safe_urls — not by URL
+            # string — because providers echo post-redirect sourceURL and
+            # duplicate input URLs are legal. See plan for full rationale.
+            from agent.web_search_registry import (
+                _LEGACY_PREFERENCE,
+                get_provider as _wsp_get_provider2,
+            )
+
+            # Step 1: Align primary results to safe_urls positions.
+            # Guard against append-only primaries that drop URLs.
+            merged: List[Dict[str, Any]] = [{} for _ in safe_urls]
+
+            # If the primary returned exactly len(safe_urls) results,
+            # just copy them in order.
+            if len(results) == len(safe_urls):
+                for i, r in enumerate(results):
+                    merged[i] = dict(r)
+            else:
+                # Primary dropped or added entries — realign by normalized
+                # host+path match, then synthesize errors for empty slots.
+                def _normalized(u: str) -> str:
+                    """Normalize URL for matching: strip scheme, www, port, trailing slash."""
+                    p = urlparse(u)
+                    host = (p.hostname or "").lower().removeprefix("www.")
+                    path = (p.path or "").rstrip("/").lower() or "/"
+                    return f"{host}{path}"
+
+                # Build lookup from returned results
+                returned_map: Dict[str, Dict[str, Any]] = {}
+                for r in results:
+                    ru = r.get("url", "")
+                    returned_map[_normalized(ru)] = r
+
+                # Try to match each slot
+                for i, slot_url in enumerate(safe_urls):
+                    norm = _normalized(slot_url)
+                    if norm in returned_map:
+                        merged[i] = dict(returned_map.pop(norm))
+
+                # Any leftover results (shouldn't happen, but handle gracefully)
+                # are appended to the end — they'll show as errors from
+                # the next fallback iteration.
+
+            # Identify failed slots
+            failed_idx = [i for i, r in enumerate(merged) if r.get("error")]
+
+            if failed_idx:
+                logger.warning(
+                    "Web extract provider '%s' failed for %d/%d URLs, "
+                    "trying fallback providers per-URL",
+                    provider.name, len(failed_idx), len(safe_urls),
+                )
+
+                for fallback_name in _LEGACY_PREFERENCE:
+                    if fallback_name == provider.name:
+                        continue
+                    fallback = _wsp_get_provider2(fallback_name)
+                    if fallback is None or not fallback.supports_extract():
+                        continue
+                    try:
+                        avail = fallback.is_available()
+                    except Exception:
+                        avail = False
+                    if not avail:
+                        continue
+
+                    # Build failed URLs list from current failed slots
+                    failed_urls = [safe_urls[i] for i in failed_idx]
+
+                    logger.info(
+                        "Web extract fallback: trying '%s' for %d URLs",
+                        fallback_name, len(failed_urls),
+                    )
+
+                    if inspect.iscoroutinefunction(fallback.extract):
+                        fallback_results = await fallback.extract(
+                            failed_urls, format=format
+                        )
+                    else:
+                        fallback_results = await asyncio.to_thread(
+                            fallback.extract, failed_urls, format=format
+                        )
+
+                    # Map fallback results back to slots by index.
+                    # Providers may (a) return one-per-input in order,
+                    # (b) drop URLs, or (c) return post-redirect URLs.
+                    # Strategy: normalized host+path match → positional if
+                    # length matches → exact URL match as last resort.
+                    def _normalized(u: str) -> str:
+                        """Normalize URL for matching: strip scheme, www, port, trailing slash."""
+                        p = urlparse(u)
+                        host = (p.hostname or "").lower().removeprefix("www.")
+                        path = (p.path or "").rstrip("/").lower() or "/"
+                        return f"{host}{path}"
+
+                    # Build fallback result lookup
+                    fb_norm_map: Dict[str, Dict[str, Any]] = {}
+                    fb_exact_map: Dict[str, Dict[str, Any]] = {}
+                    for fr in (fallback_results or []):
+                        fru = fr.get("url", "")
+                        fb_norm_map[_normalized(fru)] = fr
+                        fb_exact_map[fru] = fr
+
+                    recovered_count = 0
+                    still_failed: List[int] = []
+
+                    for i in failed_idx:
+                        slot_url = safe_urls[i]
+                        norm = _normalized(slot_url)
+
+                        # Try normalized match first (handles redirect/normalization drift)
+                        if norm in fb_norm_map and not fb_norm_map[norm].get("error"):
+                            entry = fb_norm_map[norm]
+                        # Try exact match
+                        elif slot_url in fb_exact_map and not fb_exact_map[slot_url].get("error"):
+                            entry = fb_exact_map[slot_url]
+                        # Try positional match (only if lengths match — one-per-input)
+                        elif len(fallback_results or []) == len(failed_urls):
+                            pos = failed_idx.index(i)
+                            if pos < len(fallback_results) and not fallback_results[pos].get("error"):
+                                entry = fallback_results[pos]
+                            else:
+                                still_failed.append(i)
+                                continue
+                        else:
+                            still_failed.append(i)
+                            continue
+
+                        # Found a recovery — write shallow copy to avoid aliasing
+                        entry["url"] = slot_url  # canonicalize to requested URL
+                        merged[i] = dict(entry)
+                        recovered_count += 1
+
+                    failed_idx = still_failed
+                    if recovered_count > 0:
+                        logger.info(
+                            "Web extract fallback '%s' recovered %d/%d URLs",
+                            fallback_name, recovered_count,
+                            len(failed_idx) + recovered_count,
+                        )
+                    if not failed_idx:
+                        break
+                    # Continue to next provider with remaining failures
+                    logger.warning(
+                        "Web extract fallback '%s' still has %d failed URLs",
+                        fallback_name, len(failed_idx),
+                    )
+
+            results = merged
+
         # Reconstruct the original input order across invalid, blocked, and
         # provider-processed entries. Providers are expected to preserve the
-        # order of the safe URL list they receive.
+        # order of the safe URL list they receive. Runs AFTER the per-URL
+        # fallback retry above so invalid/SSRF-blocked slots are still
+        # correctly positioned even when some safe URLs needed a fallback
+        # provider.
         if invalid_urls or ssrf_blocked:
             safe_results = {
                 index: (
@@ -962,6 +1164,7 @@ async def web_extract_tool(
             }
             by_index = {**safe_results, **ssrf_blocked, **invalid_urls}
             results = [by_index[index] for index in range(len(urls))]
+
 
         response = {"results": results}
         

@@ -1,0 +1,7 @@
+name: web-trafilatura
+version: 1.0.0
+description: "Trafilatura local extract provider — static HTML → Markdown. Requires `trafilatura` + `httpx` packages. No API key needed."
+author: NousResearch
+kind: backend
+provides_web_providers:
+  - trafilatura
