@@ -38,24 +38,51 @@ class CustomProfile(ProviderProfile):
         # Reasoning / thinking control for custom OpenAI-compatible endpoints
         # (GLM-5.2 on Volcengine ARK, vLLM, Ollama, llama.cpp, …).
         #
-        #   - disabled  → extra_body.think = False (Ollama's thinking-off flag)
+        #   - disabled  → extra_body.think = False (Ollama's thinking-off flag).
+        #     For detected vLLM / llama.cpp also emit
+        #     chat_template_kwargs.enable_thinking = False — the ONLY key those
+        #     backends honor to turn Qwen3-style reasoning off (they ignore
+        #     ``think``; see vLLM reasoning-outputs docs).
         #   - enabled + effort set → TOP-LEVEL reasoning_effort string, the
         #     format GLM-5.2/ARK and other OpenAI-compatible reasoning APIs
         #     expect (GLM documents "high" and "max"; "max" is its default).
+        #     For detected vLLM / llama.cpp also emit enable_thinking = True so
+        #     the chat template actually produces reasoning content.
         #   - enabled + no effort  → omit both, so the endpoint applies its own
         #     server-side default (do NOT force a level the user didn't pick).
         #
-        # We deliberately do NOT emit ``think=True`` on enable: it is an
-        # Ollama-only flag and thinking is already server-default-on for these
-        # backends, so forcing it risks a 400 on GLM/vLLM endpoints that don't
-        # recognize it. Mirrors the DeepSeek/Zai profile precedent.
+        # chat_template_kwargs is scoped to *detected* vLLM / llama.cpp only: it
+        # is a chat-template concept those servers understand, and sending it to
+        # GLM/ARK (also provider=custom) risks a 400. We keep the deliberate
+        # choice to NOT emit ``think=True`` on enable (Ollama-only flag).
         if reasoning_config and isinstance(reasoning_config, dict):
             _effort = (reasoning_config.get("effort") or "").strip().lower()
             _enabled = reasoning_config.get("enabled", True)
+
+            # Detect vLLM / llama.cpp so chat-template flags only go to backends
+            # that understand them. base_url is passed by the chat_completions
+            # transport (see agent/transports/chat_completions.py). The probe is
+            # a lightweight local /version + /models GET (~8ms warm on a LAN box)
+            # and is best-effort: any failure leaves _server_type None so we fall
+            # back to the safe GLM/ARK path (no chat_template_kwargs emitted).
+            _base_url = ctx.get("base_url") or self.base_url or ""
+            _server_type = None
+            if _base_url:
+                try:
+                    from agent.model_metadata import detect_local_server_type
+                    _server_type = detect_local_server_type(_base_url)
+                except Exception:
+                    _server_type = None
+            _templated = _server_type in ("vllm", "llamacpp")
+
             if _effort == "none" or _enabled is False:
                 extra_body["think"] = False
+                if _templated:
+                    extra_body["chat_template_kwargs"] = {"enable_thinking": False}
             elif _effort:
                 top_level["reasoning_effort"] = _effort
+                if _templated:
+                    extra_body["chat_template_kwargs"] = {"enable_thinking": True}
 
         return extra_body, top_level
 
