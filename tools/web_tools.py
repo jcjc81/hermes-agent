@@ -315,18 +315,29 @@ def _get_capability_backend(capability: str) -> str:
     """Shared helper for per-capability backend selection.
 
     Reads ``web.{capability}_backend`` from config; if set and available,
-    uses it. For extract, if no config is set and trafilatura is importable,
+    uses it. For extract, if NEITHER the per-capability override NOR the
+    shared ``web.backend`` is explicitly set, and trafilatura is importable,
     defaults to trafilatura (local, free, no API key needed). Otherwise
     falls through to the shared ``_get_backend()``.
+
+    The shared-``web.backend`` check matters: without it, a user who
+    explicitly sets ``web.backend: firecrawl`` (and has valid credentials)
+    would have that choice silently overridden by trafilatura the moment
+    the plugin is available, even though they never asked for a
+    capability-specific override. Priority order stays exactly as
+    documented: ``web.{capability}_backend`` > ``web.backend`` (shared) >
+    auto-detect (trafilatura-default only applies within "auto-detect").
     """
     cfg = _load_web_config()
     specific = (cfg.get(f"{capability}_backend") or "").lower().strip()
     if specific and _is_backend_available(specific):
         return specific
 
-    # Trafilatura is the preferred default extract backend when no explicit
-    # config is set — it's local, free, and needs no API key.
-    if capability == "extract" and _is_backend_available("trafilatura"):
+    # Trafilatura is the preferred default extract backend when NO explicit
+    # backend (neither the per-capability override nor the shared
+    # web.backend) is configured — it's local, free, and needs no API key.
+    shared = (cfg.get("backend") or "").lower().strip()
+    if capability == "extract" and not shared and _is_backend_available("trafilatura"):
         return "trafilatura"
 
     return _get_backend(capability)
