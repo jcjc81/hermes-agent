@@ -930,6 +930,7 @@ async def web_extract_tool(
         # Dispatch only safe URLs to the configured backend
         if not safe_urls:
             results = []
+            provider = None  # nothing dispatched — no primary provider to report
         else:
             backend = _get_extract_backend()
 
@@ -1042,6 +1043,7 @@ async def web_extract_tool(
             if len(results) == len(safe_urls):
                 for i, r in enumerate(results):
                     merged[i] = dict(r)
+                    merged[i]["provider"] = provider.name
             else:
                 # Primary dropped or added entries — realign by normalized
                 # host+path match, then synthesize errors for empty slots.
@@ -1063,6 +1065,7 @@ async def web_extract_tool(
                     norm = _normalized(slot_url)
                     if norm in returned_map:
                         merged[i] = dict(returned_map.pop(norm))
+                        merged[i]["provider"] = provider.name
 
                 # Any leftover results (shouldn't happen, but handle gracefully)
                 # are appended to the end — they'll show as errors from
@@ -1156,6 +1159,7 @@ async def web_extract_tool(
                         # Found a recovery — write shallow copy to avoid aliasing
                         entry["url"] = slot_url  # canonicalize to requested URL
                         merged[i] = dict(entry)
+                        merged[i]["provider"] = fallback_name
                         recovered_count += 1
 
                     failed_idx = still_failed
@@ -1199,10 +1203,22 @@ async def web_extract_tool(
             results = [by_index[index] for index in range(len(urls))]
 
 
-        # Capture which provider actually served (may differ from backend if
-        # fallback kicked in during per-URL retry)
-        actual_provider = provider.name if provider else "unknown"
-        
+        # Capture which provider(s) actually served each URL. Per-URL
+        # fallback (above) can recover some slots via a different provider
+        # than the primary — merged[i]["provider"] is now stamped at each
+        # write site (primary success, realign match, and fallback
+        # recovery), so this reflects reality instead of always reporting
+        # the primary's name even when a fallback silently took over.
+        _observed_providers = sorted({
+            str(r.get("provider")) for r in results if isinstance(r, dict) and r.get("provider")
+        })
+        if len(_observed_providers) == 1:
+            actual_provider = _observed_providers[0]
+        elif len(_observed_providers) > 1:
+            actual_provider = "mixed"
+        else:
+            actual_provider = provider.name if provider else "unknown"
+
         response = {"results": results}
         
         pages_extracted = len(response.get('results', []))
