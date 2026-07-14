@@ -3339,8 +3339,14 @@ class SlackAdapter(BasePlatformAdapter):
         session_key: str,
         confirm_id: str,
         metadata: Optional[Dict[str, Any]] = None,
+        allow_always: bool = True,
     ) -> SendResult:
-        """Send a Block Kit three-option slash-command confirmation prompt."""
+        """Send a Block Kit slash-command confirmation prompt.
+
+        Renders Approve Once / Cancel, plus a middle "Always Approve" button
+        when ``allow_always`` is True (the default).  Callers pass False for
+        rare high-stakes commands (``/update``).
+        """
         if not self._app:
             return SendResult(success=False, error="Not connected")
 
@@ -3356,6 +3362,34 @@ class SlackAdapter(BasePlatformAdapter):
             # callback handler can resolve without extra bookkeeping.
             value = f"{session_key}|{confirm_id}"
 
+            action_elements = [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Approve Once"},
+                    "style": "primary",
+                    "action_id": "hermes_confirm_once",
+                    "value": value,
+                },
+            ]
+            if allow_always:
+                action_elements.append(
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Always Approve"},
+                        "action_id": "hermes_confirm_always",
+                        "value": value,
+                    }
+                )
+            action_elements.append(
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Cancel"},
+                    "style": "danger",
+                    "action_id": "hermes_confirm_cancel",
+                    "value": value,
+                }
+            )
+
             blocks = [
                 {
                     "type": "section",
@@ -3366,28 +3400,7 @@ class SlackAdapter(BasePlatformAdapter):
                 },
                 {
                     "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Approve Once"},
-                            "style": "primary",
-                            "action_id": "hermes_confirm_once",
-                            "value": value,
-                        },
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Always Approve"},
-                            "action_id": "hermes_confirm_always",
-                            "value": value,
-                        },
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Cancel"},
-                            "style": "danger",
-                            "action_id": "hermes_confirm_cancel",
-                            "value": value,
-                        },
-                    ],
+                    "elements": action_elements,
                 },
             ]
 
