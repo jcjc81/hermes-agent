@@ -949,7 +949,11 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
     # found, delegate fully; otherwise fall through to the legacy flag path.
     try:
         from providers import get_provider_profile
-        _profile = get_provider_profile(agent.provider)
+        # resolve_custom_slug=True: a user-config `custom:<name>` slug takes the
+        # same profile path as bare `custom`, so the wire sends the custom
+        # profile's max_tokens default (matching the compressor's reservation,
+        # #43547) instead of silently dropping to the legacy no-default branch.
+        _profile = get_provider_profile(agent.provider, resolve_custom_slug=True)
     except Exception:
         _profile = None
 
@@ -1795,7 +1799,9 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             try:
                 from providers import get_provider_profile
 
-                provider_profile = get_provider_profile(agent.provider)
+                provider_profile = get_provider_profile(
+                    agent.provider, resolve_custom_slug=True
+                )
                 if provider_profile is not None:
                     profile_extra_body = provider_profile.build_extra_body(
                         session_id=getattr(agent, "session_id", None),

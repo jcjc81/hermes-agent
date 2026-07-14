@@ -62,13 +62,30 @@ def register_provider(profile: ProviderProfile) -> None:
         _ALIASES[alias] = profile.name
 
 
-def get_provider_profile(name: str) -> ProviderProfile | None:
+def get_provider_profile(
+    name: str, *, resolve_custom_slug: bool = False,
+) -> ProviderProfile | None:
     """Look up a provider profile by name or alias.
 
     Returns None if the provider has no profile (falls back to generic).
+
+    ``resolve_custom_slug`` (opt-in): when True, a user-config custom-provider
+    slug of the form ``custom:<name>`` (e.g. ``custom:vllm-5090``) resolves to
+    the bundled ``custom`` ProviderProfile -- the ``<name>`` suffix is a user
+    label, not a registry key. The agent stores the provider string verbatim
+    (``agent.provider == "custom:vllm-5090"``), and only the paths that resolve
+    an output-token reservation need this mapping so the wire and the context
+    compressor agree with the bare-``custom`` case. It is OFF by default so the
+    other callers (CLI model-picker dispatch, aux-model lookup, vision flags)
+    keep their existing behavior -- a ``custom:`` slug is NOT a real
+    ``api_key`` provider for those flows. A BARE user-config name with no
+    ``custom:`` prefix (``vllm-5090``) is intentionally NOT mapped here: nothing
+    syntactic marks it as custom, so config normalization handles that case.
     """
     if not _discovered:
         _discover_providers()
+    if resolve_custom_slug and isinstance(name, str) and name.startswith("custom:"):
+        name = "custom"
     canonical = _ALIASES.get(name, name)
     return _REGISTRY.get(canonical)
 
