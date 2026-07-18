@@ -531,6 +531,65 @@ def _rich_normalize_linebreaks(text: str) -> str:
     return ''.join(out)
 
 
+# Matches a fenced code block OR an inline code span. Dollar signs inside code
+# (e.g. a shell example ``$(cmd)``) must render literally and are never
+# subject to Telegram's rich-markdown math parsing in the first place, so
+# these regions are left completely untouched by ``_escape_rich_bare_dollars``.
+_RICH_CODE_RE = re.compile(
+    r'(?:```[^\n]*\n[\s\S]*?```)'  # fenced code block
+    r'|(?:`[^`\n]+`)',              # inline code span
+)
+
+# A $$...$$ block-math pair. Non-greedy + DOTALL so it can span multiple
+# lines; used to protect intentional block math from the bare-$ escaping
+# below (see ``_escape_bare_dollars_in_prose``).
+_RICH_BLOCK_MATH_RE = re.compile(r'\$\$.*?\$\$', re.DOTALL)
+
+
+def _escape_bare_dollars_in_prose(prose: str) -> str:
+    """Escape single ``$`` in *prose* while preserving ``$$...$$`` block math."""
+    if '$' not in prose:
+        return prose
+    parts = _RICH_BLOCK_MATH_RE.split(prose)
+    matches = _RICH_BLOCK_MATH_RE.findall(prose)
+    out: list[str] = []
+    for i, part in enumerate(parts):
+        out.append(part.replace('$', '\\$'))
+        if i < len(matches):
+            out.append(matches[i])  # $$...$$ block kept verbatim
+    return ''.join(out)
+
+
+def _escape_rich_bare_dollars(text: str) -> str:
+    """Escape bare ``$`` so Telegram's rich parser doesn't read it as math.
+
+    Telegram Bot API 10.1 Rich Messages treat ``$...$`` as inline LaTeX math
+    delimiters (see https://core.telegram.org/bots/api#rich-markdown-style).
+    Hermes has no intentional single-``$``-delimited inline math in its own
+    output — the only sanctioned math syntax elsewhere in this adapter is
+    block math (``$$...$$``), ``\\(...\\)``, ``\\[...\\]``, and LaTeX macros
+    (see ``_RICH_MATH_IN_DETAILS_RE``). A bare, unpaired ``$`` in ordinary
+    prose (almost always a currency figure like ``$395k``) would otherwise
+    be silently swallowed — together with an arbitrary run of text up to the
+    next ``$`` — into a single garbled inline-math span by Telegram's own
+    client-side parser. Escaping every lone ``$`` to ``\\$`` before it is
+    sent prevents that misparse while leaving intentional ``$$...$$`` block
+    math untouched. Fenced code blocks and inline code spans are also left
+    completely untouched. Refs: NousResearch/hermes-agent#66746.
+    """
+    if not text or '$' not in text:
+        return text
+
+    out: list[str] = []
+    pos = 0
+    for m in _RICH_CODE_RE.finditer(text):
+        out.append(_escape_bare_dollars_in_prose(text[pos:m.start()]))
+        out.append(m.group(0))  # code span/block kept verbatim
+        pos = m.end()
+    out.append(_escape_bare_dollars_in_prose(text[pos:]))
+    return ''.join(out)
+
+
 # Watchdog bound for `await updater.stop()`. When the underlying TCP socket is
 # in CLOSE-WAIT the PTB polling task is blocked on epoll on the dead socket and
 # never wakes, so an unguarded stop() hangs indefinitely and wedges the whole
@@ -1623,11 +1682,19 @@ class TelegramAdapter(BasePlatformAdapter):
         Never pass ``format_message(content)`` here — that converts to
         MarkdownV2 and would escape/destroy rich syntax like table pipes.
 
+        Bare ``$`` are escaped first so Telegram's rich-markdown parser does
+        not misread currency figures (e.g. ``$395k``) as inline LaTeX math
+        delimiters — see ``_escape_rich_bare_dollars`` and
+        NousResearch/hermes-agent#66746. Intentional ``$$...$$`` block math
+        and code spans/blocks are left untouched.
+
         Single newlines are normalized to Markdown hard breaks so that
         multi-line content (slash-command lists, etc.) renders correctly
         in the rich-message path.  See ``_rich_normalize_linebreaks``.
         """
-        payload: Dict[str, Any] = {"markdown": _rich_normalize_linebreaks(content)}
+        markdown = _escape_rich_bare_dollars(content)
+        markdown = _rich_normalize_linebreaks(markdown)
+        payload: Dict[str, Any] = {"markdown": markdown}
         if skip_entity_detection:
             payload["skip_entity_detection"] = True
         return payload
