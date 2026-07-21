@@ -532,6 +532,68 @@ def _rich_normalize_linebreaks(text: str) -> str:
     return ''.join(out)
 
 
+# ---------------------------------------------------------------------------
+# Rich-message currency-dollar escaping (issue #66746)
+# ---------------------------------------------------------------------------
+
+# Single-pass region matcher for the rich-message path.  Each alternative is
+# tried left-to-right at every position; the FIRST match wins, so ordering
+# matters:
+#
+#   1. Fenced code block  (```...```)  → kept verbatim
+#   2. Inline code span   (`...`)      → kept verbatim
+#   3. $$ block math      ($$...$$)    → kept verbatim (the only math
+#      contract this adapter supports; _needs_rich_rendering fires on $$)
+#   4. Currency dollar    ($<digit>)   → escaped to \$
+#
+# Anything that doesn't match any alternative (including $ followed by a
+# letter or backslash, i.e. intentional inline math like $E=mc^2$ or
+# $\alpha$) passes through untouched.
+#
+# Why digit-prefix and not blanket-escape: the system prompt
+# (agent/prompt_builder.py) actively instructs the agent to use $...$
+# inline math.  Escaping every bare $ would destroy that sanctioned syntax
+# — the same class of bug the maintainer flagged in #66779 and #66784
+# (keep_open / salvageability=medium).  A $ immediately followed by a digit
+# is overwhelmingly a currency/price figure ($395k, $50, $168k); a $
+# followed by a letter or backslash is overwhelmingly intentional math
+# ($E=mc^2$, $x^2+y^2$, $\alpha$).  The one theoretical gap — $5$ as
+# inline math — is vanishingly rare in practice and degrades gracefully
+# (renders as literal "$5" instead of math-styled "5").
+_RICH_CURRENCY_DOLLAR_RE = re.compile(
+    r'(?:```[^\n]*\n[\s\S]*?```)'        # fenced code block
+    r'|(?:`[^`\n]+`)'                     # inline code span
+    r'|(?:\$\$[\s\S]*?\$\$)'             # $$ block math
+    r'|(?P<currency>\$(?=\d))',           # bare $ followed by a digit
+)
+
+
+def _escape_rich_currency_dollars(text: str) -> str:
+    """Escape currency ``$`` so Telegram's rich parser doesn't read it as math.
+
+    Telegram Bot API 10.1 Rich Messages treat ``$...$`` as inline LaTeX math
+    delimiters (https://core.telegram.org/bots/api#rich-markdown-style).
+    Two or more bare ``$`` currency figures in the same message (e.g.
+    ``$395k`` and ``$483k``) get paired by Telegram's own client-side parser
+    into a single garbled inline-math span, with any ``**bold**`` markers
+    straddling the pair breaking too.
+
+    This escapes ONLY ``$`` immediately followed by a digit (the currency
+    signal), leaving intentional inline math (``$E=mc^2$``, ``$\\alpha$``)
+    and ``$$...$$`` block math completely untouched.  Fenced code blocks and
+    inline code spans are also left verbatim.  Refs: #66746.
+    """
+    if not text or '$' not in text:
+        return text
+
+    def _sub(m: re.Match) -> str:
+        if m.lastgroup == "currency":
+            return r"\$"
+        return m.group(0)  # code span / fenced block / $$ math → verbatim
+
+    return _RICH_CURRENCY_DOLLAR_RE.sub(_sub, text)
+
+
 # Watchdog bound for `await updater.stop()`. When the underlying TCP socket is
 # in CLOSE-WAIT the PTB polling task is blocked on epoll on the dead socket and
 # never wakes, so an unguarded stop() hangs indefinitely and wedges the whole
@@ -1642,11 +1704,19 @@ class TelegramAdapter(BasePlatformAdapter):
         Never pass ``format_message(content)`` here — that converts to
         MarkdownV2 and would escape/destroy rich syntax like table pipes.
 
+        Currency ``$`` figures (``$`` immediately followed by a digit) are
+        escaped to ``\\$`` so Telegram's rich-markdown parser does not pair
+        two dollar amounts into a garbled inline-math span (#66746).
+        Intentional inline math (``$E=mc^2$``, ``$\\alpha$``), ``$$...$$``
+        block math, and code spans/blocks are left untouched.
+
         Single newlines are normalized to Markdown hard breaks so that
         multi-line content (slash-command lists, etc.) renders correctly
         in the rich-message path.  See ``_rich_normalize_linebreaks``.
         """
-        payload: Dict[str, Any] = {"markdown": _rich_normalize_linebreaks(content)}
+        markdown = _escape_rich_currency_dollars(content)
+        markdown = _rich_normalize_linebreaks(markdown)
+        payload: Dict[str, Any] = {"markdown": markdown}
         if skip_entity_detection:
             payload["skip_entity_detection"] = True
         return payload
