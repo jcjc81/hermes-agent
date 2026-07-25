@@ -194,7 +194,9 @@ class TestVLLMLlamaCppClamp:
             model="qwen3",
         )
         assert eb == {"think": False, "chat_template_kwargs": {"enable_thinking": False}}
-        assert tl == {}
+        # Upstream Ollama fix (#25758): reasoning_effort="none" is now always
+        # emitted top-level when disabled — complementary to our chat_template_kwargs.
+        assert tl == {"reasoning_effort": "none"}
 
     @pytest.mark.parametrize("server_type", ["vllm", "llamacpp"])
     def test_unrecognized_effort_defaults_to_high(

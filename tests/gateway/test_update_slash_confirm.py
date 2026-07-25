@@ -220,13 +220,18 @@ async def test_resolve_always_spawns_once_and_never_persists(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_managed_install_blocks_before_prompt(monkeypatch):
-    """A managed install is rejected before any prompt is shown."""
-    monkeypatch.setenv("HERMES_MANAGED", "homebrew")
+    """A managed install is rejected before any prompt is shown.
+
+    Uses NixOS (HERMES_MANAGED=nixos) since upstream dropped Homebrew as a
+    managed system (_IGNORED_MANAGED_VALUES) — Homebrew installs now fall
+    through to git detection and are allowed to self-update.
+    """
+    monkeypatch.setenv("HERMES_MANAGED", "nixos")
     runner = _make_runner()
 
     result = await runner._handle_update_command(_make_event())
 
-    assert "managed by Homebrew" in result
+    assert "managed by NixOS" in result
     runner._execute_update.assert_not_awaited()
     runner.adapters[Platform.TELEGRAM].send_slash_confirm.assert_not_awaited()
 
