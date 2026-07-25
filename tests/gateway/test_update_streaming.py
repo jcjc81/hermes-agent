@@ -211,9 +211,19 @@ class TestUpdateCommandGatewayFlag:
 
     @pytest.mark.asyncio
     async def test_spawns_with_gateway_flag(self, tmp_path):
-        """The spawned update command includes --gateway and PYTHONUNBUFFERED."""
+        """The spawned update command includes --gateway and PYTHONUNBUFFERED.
+
+        /update routes through the slash-confirm primitive (no config opt-out),
+        so the spawn only fires after the pending confirmation is resolved with
+        a non-cancel choice — resolve it here before asserting on Popen.
+        """
+        from gateway.session import build_session_key
+        from tools import slash_confirm as _slash_confirm_mod
+
         runner = _make_runner()
         event = _make_event()
+        session_key = build_session_key(event.source)
+        _slash_confirm_mod.clear(session_key)
 
         fake_root = tmp_path / "project"
         fake_root.mkdir()
@@ -230,6 +240,13 @@ class TestUpdateCommandGatewayFlag:
              patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}"), \
              patch("subprocess.Popen", mock_popen):
             result = await runner._handle_update_command(event)
+
+            # /update returns the confirm prompt and defers the spawn.
+            pending = _slash_confirm_mod.get_pending(session_key)
+            assert pending is not None, "/update must route through slash-confirm"
+            result = await _slash_confirm_mod.resolve(
+                session_key, pending["confirm_id"], "once",
+            )
 
         # Check the bash command string contains --gateway and PYTHONUNBUFFERED
         call_args = mock_popen.call_args[0][0]
