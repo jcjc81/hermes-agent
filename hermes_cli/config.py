@@ -1469,6 +1469,13 @@ DEFAULT_CONFIG = {
                                       # tool iteration. 0 = commit any non-zero prune.
         "hygiene_hard_message_limit": 5000,  # gateway session-hygiene force-compress threshold by message count
         "hygiene_timeout_seconds": 30,  # max seconds gateway waits for pre-agent hygiene compression
+                                      # WITHOUT forward progress. The summary call streams, so
+                                      # this is an inactivity budget: a slow model still
+                                      # producing tokens keeps extending the wait; only a
+                                      # silent/hung call is cut off.
+        "hygiene_total_ceiling_seconds": 600,  # absolute cap on the hygiene compression wait even
+                                      # while tokens are still moving — bounds a degenerate
+                                      # trickle stream. Clamped to >= hygiene_timeout_seconds.
         "hygiene_failure_cooldown_seconds": 300,  # skip repeated failed hygiene attempts for this session
         "protect_first_n": 3,         # non-system head messages always preserved
                                       # verbatim, in ADDITION to the system prompt
@@ -1525,8 +1532,8 @@ DEFAULT_CONFIG = {
                                       # turns are soft-archived under the same id
                                       # (active=0, compacted=1) — still searchable via
                                       # session_search and recoverable, not deleted.
-                                      # Default False during rollout; will flip on
-                                      # after live validation.
+                                      # Default True since 2107b86024; set False to
+                                      # restore the legacy rotating-compaction path.
         "model_thresholds": {},       # Per-model threshold overrides. Keys are
                                       # substring-matched against the model name
                                       # (longest match wins); values replace the
@@ -1651,6 +1658,13 @@ DEFAULT_CONFIG = {
         # not a meaningful recovery, so an unretried blip silently loses the
         # call.
         "transient_retries": 2,
+        # Endpoints that reject NON-streaming chat requests outright (e.g.
+        # Tencent Copilot returns HTTP 400 "Non-stream chat request is
+        # currently not supported"). Auxiliary calls to a matching endpoint
+        # are sent with stream=True and aggregated client-side. Entries are
+        # case-insensitive substrings matched against the endpoint URL;
+        # copilot.tencent.com is always treated as stream-only.
+        "stream_only_base_urls": [],
         "vision": {
             "provider": "auto",    # auto | openrouter | nous | codex | custom
             "model": "",           # e.g. "google/gemini-2.5-flash", "gpt-4o"
@@ -2987,22 +3001,40 @@ DEFAULT_CONFIG = {
     # openclaw-tool-search-report PDF in this PR for the rationale.
     "tools": {
         "tool_search": {
-            # "auto" (default) — activate only when deferrable tool schemas
-            #   exceed ``threshold_pct`` of the active model's context length,
-            #   so small toolsets pay no overhead.
-            # "on"  — always activate when there is at least one deferrable
-            #   tool. Use when you have many MCP servers and want maximum
-            #   token reduction unconditionally.
+            # Tiered disclosure: any deferrable (MCP/plugin) tool activates
+            # the bridge; the listing then scales with catalog size.
+            #   Tier 0 — no MCP/plugin tools: everything stays eager.
+            #   Tier 1 — catalog listing fits the budget: bridge + skills-style
+            #     name+description manifest (degrades to names-only).
+            #   Tier 2 — per-tool listing over budget even names-only (e.g.
+            #     Cloudflare's ~3,300-tool flat API surface): bare bridge +
+            #     a one-line-per-server summary (name + tool count) so the
+            #     model knows which domains are reachable; individual tools
+            #     discoverable through tool_search only.
+            # "auto"/"on" — activate when at least one deferrable tool exists.
             # "off" — disable entirely. Tools-array assembly is a pass-through.
             "enabled": "auto",
-            # Percentage of context length at which "auto" mode kicks in.
-            # 10 matches the Claude Code default. Range 0..100.
-            "threshold_pct": 10,
+            # Listing budget as a percentage of the active model's context
+            # length. Effective budget = min(this % of context,
+            # listing_max_tokens). Range 0..100.
+            "threshold_pct": 5,
             # When the model calls tool_search without a ``limit`` argument,
             # how many hits to return. Range 1..max_search_limit.
             "search_default_limit": 5,
             # Hard upper bound the model can request via ``limit``. Range 1..50.
             "max_search_limit": 20,
+            # Skills-style catalog listing embedded in the tool_search bridge
+            # description: every deferred tool's name + first sentence of its
+            # description (≤60 chars), grouped by MCP server / toolset. Keeps
+            # capabilities discoverable while schemas stay deferred.
+            # "auto" (default) — include when the listing fits the budget
+            #   (falls back to names-only, then to the bare tier-2 bridge).
+            # "on"  — same rendering, but explicit intent to always list.
+            # "off" — always the bare bridge (tier 2 for every catalog).
+            "listing": "auto",
+            # Absolute cap on the embedded listing in tokens (chars/4
+            # estimate), regardless of context size. Range 200..60000.
+            "listing_max_tokens": 20000,
         },
     },
 
