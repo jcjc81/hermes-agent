@@ -757,20 +757,32 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             )
             response_data = provider.search(query, limit)
 
-            # If the primary provider failed at runtime (e.g. out of credits,
-            # API error), walk the remaining available providers in legacy
-            # preference order and try each one until one succeeds.
-            if not response_data.get("success", True):
+            # Fall back to other providers when the primary failed at runtime
+            # (e.g. out of credits, API error) OR returned zero results.
+            # Zero-result success is common when a provider's upstreams are
+            # degraded (e.g. a SearXNG instance whose scrape engines are all
+            # CAPTCHA-suspended answers ``success: true`` with an empty list);
+            # without this trigger the fallback walk below never fires and the
+            # empty answer silently propagates to the agent.
+            primary_failed = not response_data.get("success", True)
+            primary_empty = not (response_data.get("data") or {}).get("web")
+            if primary_failed or primary_empty:
                 from agent.web_search_registry import (
-                    _LEGACY_PREFERENCE,
+                    _FALLBACK_PREFERENCE,
                     get_provider as _wsp_get_provider2,
                 )
-                primary_error = response_data.get("error", "unknown error")
-                logger.warning(
-                    "Web search provider '%s' failed ('%s'), trying fallback providers",
-                    provider.name, primary_error,
-                )
-                for fallback_name in _LEGACY_PREFERENCE:
+                if primary_failed:
+                    primary_error = response_data.get("error", "unknown error")
+                    logger.warning(
+                        "Web search provider '%s' failed ('%s'), trying fallback providers",
+                        provider.name, primary_error,
+                    )
+                else:
+                    logger.warning(
+                        "Web search provider '%s' returned no results, trying fallback providers",
+                        provider.name,
+                    )
+                for fallback_name in _FALLBACK_PREFERENCE:
                     if fallback_name == provider.name:
                         continue
                     fallback = _wsp_get_provider2(fallback_name)
@@ -786,16 +798,28 @@ def web_search_tool(query: str, limit: int = 5) -> str:
                         "Web search fallback: trying '%s'", fallback_name,
                     )
                     fallback_data = fallback.search(query, limit)
-                    if fallback_data.get("success", True):
-                        logger.info(
-                            "Web search fallback '%s' succeeded", fallback_name,
+                    if not fallback_data.get("success", True):
+                        logger.warning(
+                            "Web search fallback '%s' also failed: %s",
+                            fallback_name, fallback_data.get("error", "?"),
                         )
-                        response_data = fallback_data
-                        break
-                    logger.warning(
-                        "Web search fallback '%s' also failed: %s",
-                        fallback_name, fallback_data.get("error", "?"),
+                        continue
+                    if not (fallback_data.get("data") or {}).get("web"):
+                        logger.info(
+                            "Web search fallback '%s' also returned no results",
+                            fallback_name,
+                        )
+                        continue
+                    logger.info(
+                        "Web search fallback '%s' succeeded", fallback_name,
                     )
+                    response_data = fallback_data
+                    break
+                else:
+                    # No fallback produced results — keep the primary's
+                    # response so the agent sees the original outcome
+                    # (error or empty) rather than an intermediate one.
+                    pass
 
         debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
         result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
