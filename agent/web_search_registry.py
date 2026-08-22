@@ -206,6 +206,23 @@ def _keyless_preference() -> tuple:
     return _KEYLESS_PREFERENCE
 
 
+# Degradation order — used ONLY by the runtime fallback walk (when the
+# active provider errors or returns zero results), never for active-provider
+# selection. Deliberately cost-first: free/quasi-free providers before paid
+# or metered ones, so an outage of the configured primary burns free-tier
+# quota before spending paid credits. ``_LEGACY_PREFERENCE`` above stays
+# quality-first for its role (picking the active provider on installs with
+# no explicit config); the two orderings serve different purposes.
+_FALLBACK_PREFERENCE = (
+    "brave-free",   # free tier (2k queries/mo), search-only
+    "ddgs",         # free, library-based scraping
+    "searxng",      # free self-hosted
+    "exa",          # paid/metered below here
+    "tavily",
+    "parallel",
+    "firecrawl",
+)
+
 def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearchProvider]:
     """Resolve the active provider for a capability ("search" | "extract").
 

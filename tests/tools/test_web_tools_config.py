@@ -426,7 +426,16 @@ class TestWebSearchSchema:
         # tool dispatcher resolves a provider from the registry and calls
         # provider.search(query, limit). Mock the provider lookup so we can
         # assert the limit is clamped before reaching the backend.
-        fake_search = MagicMock(return_value={"success": True, "data": {"web": []}})
+        #
+        # The fake returns a non-empty result on purpose: since the
+        # zero-results fallback fix, an empty success response triggers the
+        # fallback walk, which would re-invoke the (globally mocked)
+        # get_provider under other names and break the call-count assert.
+        fake_search = MagicMock(return_value={
+            "success": True,
+            "data": {"web": [{"title": "hit", "url": "https://example.com",
+                               "description": "", "position": 1}]},
+        })
         fake_provider = MagicMock(
             name="ParallelWebSearchProvider",
             supports_search=MagicMock(return_value=True),
@@ -441,7 +450,8 @@ class TestWebSearchSchema:
              patch.object(tools.web_tools._debug, "save"):
             result = json.loads(tools.web_tools.web_search_tool("docs", limit=500))
 
-        assert result == {"success": True, "data": {"web": []}}
+        assert result["success"] is True
+        assert len(result["data"]["web"]) == 1
         fake_search.assert_called_once_with("docs", 100)
 
 
