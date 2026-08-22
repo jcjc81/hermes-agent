@@ -104,16 +104,24 @@ class CustomProfile(ProviderProfile):
                 if _templated:
                     extra_body["chat_template_kwargs"] = {"enable_thinking": False}
             elif _effort:
-                # Templated backends (vLLM / llama.cpp) reject Hermes-only
+# Templated backends (vLLM / llama.cpp) reject Hermes-only
                 # levels (minimal/xhigh/max) with a non-retryable 400 — clamp
-                # to the nearest OpenAI-set value. GLM/ARK keep their raw level.
+                # to the nearest supported wire value. GLM/ARK also top out
+                # at "max" (forwarding "ultra" verbatim is a guaranteed 400,
+                # #89503), so everything funnels through the shared policy
+                # in agent.reasoning_effort. Templated backends additionally
+                # need chat_template_kwargs.enable_thinking = True so the
+                # chat template actually produces reasoning content.
+                from agent.reasoning_effort import (
+                    OPENAI_COMPAT_WIRE_EFFORTS,
+                    clamp_effort,
+                )
+
+                top_level["reasoning_effort"] = clamp_effort(
+                    _effort, OPENAI_COMPAT_WIRE_EFFORTS
+                )
                 if _templated:
-                    top_level["reasoning_effort"] = _VLLM_EFFORT_CLAMP.get(
-                        _effort, "high"
-                    )
                     extra_body["chat_template_kwargs"] = {"enable_thinking": True}
-                else:
-                    top_level["reasoning_effort"] = _effort
 
         return extra_body, top_level
 

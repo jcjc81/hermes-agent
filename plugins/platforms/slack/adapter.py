@@ -8376,6 +8376,7 @@ class SlackAdapter(BasePlatformAdapter):
                 source,
                 group_sessions_per_user=gspu,
                 thread_sessions_per_user=tspu,
+                profile=self._session_key_profile(source),
             )
         except Exception:
             return None
