@@ -74,7 +74,8 @@ def _run_search_tool(primary_name: str, registry: Dict[str, Any]) -> Dict[str, A
          patch("tools.web_tools._ensure_web_plugins_loaded"), \
          patch("tools.interrupt.is_interrupted", return_value=False), \
          patch.object(tools.web_tools._debug, "log_call"), \
-         patch.object(tools.web_tools._debug, "save"):
+         patch.object(tools.web_tools._debug, "save"), \
+         patch("tools.web_tools._keyless_rescue_enabled", return_value=False):
         return json.loads(tools.web_tools.web_search_tool("test query", 5))
 
 
