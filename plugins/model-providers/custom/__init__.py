@@ -104,21 +104,25 @@ class CustomProfile(ProviderProfile):
                 if _templated:
                     extra_body["chat_template_kwargs"] = {"enable_thinking": False}
             elif _effort:
-# Templated backends (vLLM / llama.cpp) reject Hermes-only
-                # levels (minimal/xhigh/max) with a non-retryable 400 — clamp
-                # to the nearest supported wire value. GLM/ARK also top out
-                # at "max" (forwarding "ultra" verbatim is a guaranteed 400,
-                # #89503), so everything funnels through the shared policy
-                # in agent.reasoning_effort. Templated backends additionally
-                # need chat_template_kwargs.enable_thinking = True so the
-                # chat template actually produces reasoning content.
-                from agent.reasoning_effort import (
-                    OPENAI_COMPAT_WIRE_EFFORTS,
-                    clamp_effort,
-                )
+# Templated backends (vLLM / llama.cpp) only accept the OpenAI 4-level
+                # enum (none/low/medium/high) — they reject Hermes-only
+                # levels (minimal/xhigh/max/ultra) with a non-retryable 400.
+                # Clamp via the shared policy using a narrower supported set
+                # that matches what these backends actually honor.
+                # GLM/ARK and SGLang accept the wider OpenAI-compatible
+                # vocabulary (including max) — use the full set for them
+                # (forwarding "ultra" verbatim is a guaranteed 400, #89503).
+                from agent.reasoning_effort import clamp_effort
+
+                if _templated:
+                    _supported = ("none", "low", "medium", "high")
+                else:
+                    from agent.reasoning_effort import (
+                        OPENAI_COMPAT_WIRE_EFFORTS as _supported,
+                    )
 
                 top_level["reasoning_effort"] = clamp_effort(
-                    _effort, OPENAI_COMPAT_WIRE_EFFORTS
+                    _effort, _supported
                 )
                 if _templated:
                     extra_body["chat_template_kwargs"] = {"enable_thinking": True}
