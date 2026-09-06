@@ -147,10 +147,18 @@ def registry():
 
 def _run_extract(monkeypatch, urls, config, trafilatura=None, firecrawl=None):
     """Register the given fakes, patch config + plugin discovery, and run
-    web_extract_tool(urls) to completion. Returns the parsed JSON response.
+    web_extract_tool(urls) to completion. Returns (parsed JSON response,
+    resolved_provider_name).
+
+    Upstream removed the batch-level ``provider`` field from the response;
+    provider identity is now observed by spying on
+    ``web_tools._resolve_extract_provider`` (the single resolution point the
+    dispatcher uses). The spy captures the resolved provider's name so tests
+    can still assert WHICH backend served the content.
     """
     from agent.web_search_registry import register_provider
     from tools import web_tools
+    from tools import web_tools_extract
 
     if trafilatura is not None:
         register_provider(trafilatura)
@@ -163,8 +171,18 @@ def _run_extract(monkeypatch, urls, config, trafilatura=None, firecrawl=None):
     # import the real plugin package list and clobber our fakes.
     monkeypatch.setattr(web_tools, "_ensure_web_plugins_loaded", lambda: None)
 
+    # Spy on provider resolution to capture the resolved provider name.
+    _resolved = {"name": None}
+
+    def _spy_resolve(backend):
+        provider, error_json = web_tools_extract._resolve_extract_provider(backend)
+        if provider is not None:
+            _resolved["name"] = provider.name
+        return provider, error_json
+
+    monkeypatch.setattr(web_tools, "_resolve_extract_provider", _spy_resolve)
     raw = asyncio.run(web_tools.web_extract_tool(urls))
-    return json.loads(raw)
+    return json.loads(raw), _resolved["name"]
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +194,7 @@ def test_static_page_served_by_trafilatura_firecrawl_untouched(registry, monkeyp
     trafilatura = FakeTrafilatura()
     firecrawl = FakeFirecrawl()
 
-    result = _run_extract(
+    result, provider = _run_extract(
         monkeypatch,
         ["https://example.com/static"],
         {"extract_backend": "trafilatura"},
@@ -186,7 +204,7 @@ def test_static_page_served_by_trafilatura_firecrawl_untouched(registry, monkeyp
 
     assert result["results"][0]["error"] is None
     assert result["results"][0]["content"] == "static content"
-    assert result["provider"] == "trafilatura"
+    assert provider == "trafilatura"
     assert trafilatura.calls == [["https://example.com/static"]]
     assert firecrawl.calls == [], "Firecrawl must not be invoked when trafilatura succeeds"
 
@@ -196,12 +214,15 @@ def test_static_page_served_by_trafilatura_firecrawl_untouched(registry, monkeyp
 # ---------------------------------------------------------------------------
 
 
-def test_trafilatura_quality_gate_reject_falls_back_to_firecrawl(registry, monkeypatch):
+def test_trafilatura_quality_gate_reject_triggers_keyless_rescue(registry, monkeypatch):
+    """When trafilatura's quality gate rejects a JS-rendered page, upstream
+    does a one-shot KEYLESS rescue on the same provider (not a cross-provider
+    fallback to firecrawl). Firecrawl must NOT be invoked."""
     js_url = "https://example.com/spa"
     trafilatura = FakeTrafilatura(fail_urls={js_url})
     firecrawl = FakeFirecrawl()
 
-    result = _run_extract(
+    result, provider = _run_extract(
         monkeypatch,
         [js_url],
         {"extract_backend": "trafilatura"},
@@ -209,10 +230,11 @@ def test_trafilatura_quality_gate_reject_falls_back_to_firecrawl(registry, monke
         firecrawl=firecrawl,
     )
 
-    assert result["results"][0]["error"] is None
-    assert result["results"][0]["content"] == "rendered content"
-    assert result["provider"] == "firecrawl"
-    assert firecrawl.calls == [[js_url]], "Firecrawl must be tried for the failed URL"
+    # The JS page was not served by trafilatura (quality gate) and the keyless
+    # rescue (no keyless MCP configured here) also can't render it.
+    assert result["results"][0]["error"] is not None
+    assert provider == "trafilatura"
+    assert firecrawl.calls == [], "keyless rescue must NOT invoke firecrawl"
 
 
 # ---------------------------------------------------------------------------
@@ -220,12 +242,15 @@ def test_trafilatura_quality_gate_reject_falls_back_to_firecrawl(registry, monke
 # ---------------------------------------------------------------------------
 
 
-def test_firecrawl_credits_expired_fallback_also_fails_returns_typed_error(registry, monkeypatch):
+def test_trafilatura_fail_keyless_rescue_also_fails_returns_typed_error(registry, monkeypatch):
+    """When trafilatura fails AND the one-shot keyless rescue also fails
+    (no keyless MCP available), the call returns a typed error — must not
+    crash and must not silently claim success."""
     js_url = "https://example.com/spa"
     trafilatura = FakeTrafilatura(fail_urls={js_url})
     firecrawl = FakeFirecrawl(fail_all=True)  # simulates exhausted credits
 
-    result = _run_extract(
+    result, provider = _run_extract(
         monkeypatch,
         [js_url],
         {"extract_backend": "trafilatura"},
@@ -236,7 +261,7 @@ def test_firecrawl_credits_expired_fallback_also_fails_returns_typed_error(regis
     # Must not crash and must not silently claim success.
     assert result["results"][0]["error"] is not None
     assert result["results"][0]["content"] == ""
-    assert firecrawl.calls == [[js_url]], "Firecrawl must still be attempted"
+    assert provider == "trafilatura"
 
 
 # ---------------------------------------------------------------------------
@@ -244,13 +269,17 @@ def test_firecrawl_credits_expired_fallback_also_fails_returns_typed_error(regis
 # ---------------------------------------------------------------------------
 
 
-def test_mixed_batch_static_and_js_page_resolved_independently(registry, monkeypatch):
+def test_mixed_batch_static_and_js_page_same_provider(registry, monkeypatch):
+    """A mixed batch (static + JS page) is resolved by ONE provider
+    (trafilatura, the configured backend). The static page is served; the JS
+    page gets a typed error (no cross-provider fallback in upstream's
+    keyless-rescue design)."""
     static_url = "https://example.com/static"
     js_url = "https://example.com/spa"
     trafilatura = FakeTrafilatura(fail_urls={js_url})
     firecrawl = FakeFirecrawl()
 
-    result = _run_extract(
+    result, provider = _run_extract(
         monkeypatch,
         [static_url, js_url],
         {"extract_backend": "trafilatura"},
@@ -262,15 +291,10 @@ def test_mixed_batch_static_and_js_page_resolved_independently(registry, monkeyp
     assert results[0]["url"] == static_url
     assert results[0]["content"] == "static content"
     assert results[1]["url"] == js_url
-    assert results[1]["content"] == "rendered content"
-
-    # Firecrawl must only ever have been asked for the failed URL, never
-    # the one trafilatura already served — this is the "saves credits"
-    # guarantee of the per-URL (not all-or-nothing) fallback design.
-    assert firecrawl.calls == [[js_url]]
-    assert static_url not in [u for batch in firecrawl.calls for u in batch]
-
-    assert result["provider"] == "mixed"
+    # JS page: trafilatura's quality gate rejects it; keyless rescue (no keyless
+    # MCP) can't render it → typed error.
+    assert results[1]["error"] is not None
+    assert provider == "trafilatura"
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +307,7 @@ def test_duplicate_urls_resolve_independently(registry, monkeypatch):
     trafilatura = FakeTrafilatura()
     firecrawl = FakeFirecrawl()
 
-    result = _run_extract(
+    result, provider = _run_extract(
         monkeypatch,
         [url, url],
         {"extract_backend": "trafilatura"},
@@ -310,7 +334,7 @@ def test_explicit_shared_backend_not_overridden_by_trafilatura_default(registry,
     trafilatura = FakeTrafilatura()
     firecrawl = FakeFirecrawl()
 
-    result = _run_extract(
+    result, provider = _run_extract(
         monkeypatch,
         [url],
         {"backend": "firecrawl"},  # shared config only, no extract_backend
@@ -318,7 +342,7 @@ def test_explicit_shared_backend_not_overridden_by_trafilatura_default(registry,
         firecrawl=firecrawl,
     )
 
-    assert result["provider"] == "firecrawl"
+    assert provider == "firecrawl"
     assert firecrawl.calls == [[url]]
     assert trafilatura.calls == [], "trafilatura-default must not fire when web.backend is explicitly set"
 
@@ -328,13 +352,18 @@ def test_explicit_shared_backend_not_overridden_by_trafilatura_default(registry,
 # ---------------------------------------------------------------------------
 
 
-def test_provider_field_reports_mixed_when_batch_spans_providers(registry, monkeypatch):
+def test_provider_field_reports_resolved_provider_when_batch_fails_partly(registry, monkeypatch):
+    """A batch where one URL succeeds (trafilatura) and one fails (JS page)
+    is still reported as the RESOLVED provider (trafilatura) — upstream's
+    keyless-rescue design has no 'mixed' multi-provider concept (one provider
+    serves the whole batch; failures get a typed error, not a different
+    provider)."""
     static_url = "https://example.com/static"
     js_url = "https://example.com/spa"
     trafilatura = FakeTrafilatura(fail_urls={js_url})
     firecrawl = FakeFirecrawl()
 
-    result = _run_extract(
+    result, provider = _run_extract(
         monkeypatch,
         [static_url, js_url],
         {"extract_backend": "trafilatura"},
@@ -342,14 +371,14 @@ def test_provider_field_reports_mixed_when_batch_spans_providers(registry, monke
         firecrawl=firecrawl,
     )
 
-    assert result["provider"] == "mixed"
+    assert provider == "trafilatura"
 
 
 def test_provider_field_reports_single_provider_when_uniform(registry, monkeypatch):
     trafilatura = FakeTrafilatura()
     firecrawl = FakeFirecrawl()
 
-    result = _run_extract(
+    result, provider = _run_extract(
         monkeypatch,
         ["https://example.com/a", "https://example.com/b"],
         {"extract_backend": "trafilatura"},
@@ -357,5 +386,5 @@ def test_provider_field_reports_single_provider_when_uniform(registry, monkeypat
         firecrawl=firecrawl,
     )
 
-    assert result["provider"] == "trafilatura"
+    assert provider == "trafilatura"
     assert firecrawl.calls == []

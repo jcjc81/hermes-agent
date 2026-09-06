@@ -68,14 +68,18 @@ def _result(title: str) -> Dict[str, Any]:
 
 
 def _run_search_tool(primary_name: str, registry: Dict[str, Any]) -> Dict[str, Any]:
-    """Call web_search_tool with the registry fully mocked."""
+    """Call web_search_tool with the registry fully mocked.
+
+    Mocks the keyless rescue to be disabled so the one-shot rescue path is
+    skipped and only the cost-first fallback walk (our local patch) is tested.
+    """
     with patch("tools.web_tools._get_search_backend", return_value=primary_name), \
          patch("agent.web_search_registry.get_provider", side_effect=lambda n: registry.get(n)), \
          patch("tools.web_tools._ensure_web_plugins_loaded"), \
          patch("tools.interrupt.is_interrupted", return_value=False), \
          patch.object(tools.web_tools._debug, "log_call"), \
          patch.object(tools.web_tools._debug, "save"), \
-         patch("tools.web_tools._keyless_rescue_enabled", return_value=False):
+         patch("tools.web_tools_rescue._keyless_rescue_enabled", return_value=False):
         return json.loads(tools.web_tools.web_search_tool("test query", 5))
 
 

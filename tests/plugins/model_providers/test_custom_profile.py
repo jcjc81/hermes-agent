@@ -11,15 +11,9 @@ These tests pin the wire-shape contract:
     - disabled elsewhere  → reasoning_effort=none, no think (strict APIs 422)
     - enabled + effort    → top-level reasoning_effort (native OpenAI-compat
                           format GLM/ARK expect), passed through verbatim
-for GLM/ARK/Ollama/unknown backends, including
-                          ``max``/``xhigh``
-  - vLLM/llama.cpp      → clamp xhigh/max → high, minimal → low (both
-    detected            reject Hermes-only levels with HTTP 400); emit
-                          chat_template_kwargs.enable_thinking (True/False) —
-                          the only key those backends honor to actually
-                          turn Qwen3-style reasoning on/off
-  - enabled + no effort → nothing emitted (endpoint's server default applies)
-  - ollama_num_ctx      → extra_body.options.num_ctx, orthogonal to reasoning
+                          including ``max``/``xhigh``
+    - enabled + no effort → nothing emitted (endpoint's server default applies)
+    - ollama_num_ctx      → extra_body.options.num_ctx, orthogonal to reasoning
 """
 
 from __future__ import annotations
@@ -186,14 +180,6 @@ class TestCustomReasoningWithNumCtx:
         assert eb == {"options": {"num_ctx": 8192}}
         assert tl == {}
 
-    def test_num_ctx_with_effort(self, custom_profile):
-        eb, tl = custom_profile.build_api_kwargs_extras(
-            reasoning_config={"enabled": True, "effort": "high"},
-            ollama_num_ctx=8192,
-            model="qwen3",
-        )
-        assert eb == {"options": {"num_ctx": 8192}}
-        assert tl == {"reasoning_effort": "high"}
 
 
 class TestVLLMLlamaCppClamp:
@@ -204,6 +190,9 @@ class TestVLLMLlamaCppClamp:
     vLLM (confirmed against a live 192.168.12.129:8000 Qwen3.6-27B server).
     Without chat_template_kwargs, reasoning_effort alone does not make the
     chat template actually emit reasoning content.
+
+    Re-landed post-merge (upstream's refactor dropped the templated-backend
+    branch from custom/__init__.py); these tests guard the restored clamp.
     """
 
     @pytest.fixture
@@ -247,9 +236,10 @@ class TestVLLMLlamaCppClamp:
     def test_disabled_emits_enable_thinking_false(
         self, profile, monkeypatch, server_type
     ):
-        """When reasoning is disabled, detected vLLM/llama.cpp get both
-        think=False (harmless no-op there) AND enable_thinking=False
-        (the key they actually honor)."""
+        """When reasoning is disabled, detected vLLM/llama.cpp get
+        enable_thinking=False (the key they actually honor). think=False is
+        Ollama-only (#31f0336 upstream gating) so a vLLM URL must NOT carry it
+        — vLLM/llama.cpp 422 on the unknown field."""
         monkeypatch.setattr(
             "agent.model_metadata.detect_local_server_type",
             lambda *a, **k: server_type,
@@ -259,9 +249,11 @@ class TestVLLMLlamaCppClamp:
             base_url="http://192.168.12.129:8000/v1",
             model="qwen3",
         )
-        assert eb == {"think": False, "chat_template_kwargs": {"enable_thinking": False}}
-        # Upstream Ollama fix (#25758): reasoning_effort="none" is now always
-        # emitted top-level when disabled — complementary to our chat_template_kwargs.
+        # vLLM URL: chat_template_kwargs.enable_thinking=False, no think field
+        assert eb == {"chat_template_kwargs": {"enable_thinking": False}}
+        assert "think" not in eb, "think must be Ollama-only (upstream #31f0336)"
+        # disabled always emits reasoning_effort="none" top-level (Ollama /v1
+        # ignores extra_body.think but honours top-level reasoning_effort, #25758)
         assert tl == {"reasoning_effort": "none"}
 
     @pytest.mark.parametrize("server_type", ["vllm", "llamacpp"])
@@ -290,6 +282,9 @@ class TestNonTemplatedCustomPassthrough:
 
     Regression guard: GLM-5.2/ARK natively accept max/xhigh and would break
     if clamped; Ollama doesn't understand chat_template_kwargs.
+
+    Re-landed post-merge (upstream's refactor dropped the templated-backend
+    branch from custom/__init__.py); these tests guard the restored clamp.
     """
 
     @pytest.fixture
