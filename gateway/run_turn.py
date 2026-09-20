@@ -1485,8 +1485,13 @@ class GatewayTurnMixin:
 
     async def _hmwa_post_turn_hooks(self, hook_ctx, agent_result, response):
         """agent:end hook, process-watcher scheduling, and watch-notification drain."""
+        # `response` is the DISPLAY string (reasoning-prepended + footer) truncated to
+        # 500 chars. Hooks that need the actual user-visible reply read `final_response`
+        # — the clean, full-length agent reply body (no CoT prepend, no window).
         await self.hooks.emit("agent:end", {
-            **hook_ctx, "response": (response or "")[:500], "model": agent_result.get("model", ""),
+            **hook_ctx, "response": (response or "")[:500],
+            "final_response": agent_result.get("final_response") or "",
+            "model": agent_result.get("model", ""),
             "provider": agent_result.get("provider", ""),
         })
 
