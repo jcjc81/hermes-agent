@@ -206,6 +206,8 @@ def _usage_agent_stats_lines(agent) -> list[str]:
         t("gateway.usage.label_input_tokens", count=_fmt(_n(agent, "session_input_tokens"))),
         t("gateway.usage.label_output_tokens", count=_fmt(_n(agent, "session_output_tokens"))),
         t("gateway.usage.label_total", count=_fmt(agent.session_total_tokens)),
+        t("gateway.usage.label_cache_read", count=_fmt(_n(agent, "session_cache_read_tokens"))),
+        t("gateway.usage.label_cache_write", count=_fmt(_n(agent, "session_cache_write_tokens"))),
         t("gateway.usage.label_api_calls", count=agent.session_api_calls),
     ]
     ctx = agent.context_compressor
@@ -217,6 +219,22 @@ def _usage_agent_stats_lines(agent) -> list[str]:
                        total=_fmt(ctx.context_length), pct=f"{mark}{pct:.0f}"))
     if ctx.compression_count:
         lines.append(t("gateway.usage.label_compressions", count=ctx.compression_count))
+    # Cost estimate (hidden when pricing is unknown — never a fabricated \$0.00).
+    try:
+        from agent.usage_cost import estimate_usage_cost
+        cost = estimate_usage_cost(
+            model=agent.model,
+            input_tokens=getattr(agent, "session_input_tokens", 0) or 0,
+            output_tokens=getattr(agent, "session_output_tokens", 0) or 0,
+            cache_read_tokens=getattr(agent, "session_cache_read_tokens", 0) or 0,
+            cache_write_tokens=getattr(agent, "session_cache_write_tokens", 0) or 0,
+        )
+        if cost is not None:
+            prefix = "~" if cost.get("estimated", True) else ""
+            lines.append(t("gateway.usage.label_cost", prefix=prefix,
+                           amount=f"{cost.get('total_usd', 0):.4f}"))
+    except Exception:
+        pass
     return lines
 
 

@@ -732,6 +732,12 @@ class CLIInfoMixin:
         print(f"  Prompt tokens (total):     {agent.session_prompt_tokens:>10,}")
         print(f"  Completion tokens:         {agent.session_completion_tokens:>10,}")
         print(f"  Total tokens:              {agent.session_total_tokens:>10,}")
+        cache_read = getattr(agent, "session_cache_read_tokens", 0) or 0
+        cache_write = getattr(agent, "session_cache_write_tokens", 0) or 0
+        if cache_read:
+            print(f"  Cache read tokens:         {cache_read:>10,}")
+        if cache_write:
+            print(f"  Cache write tokens:        {cache_write:>10,}")
         print(f"  API calls:                 {calls:>10,}")
         print(f"  Session duration:          {elapsed:>10}")
         print(f"  {'─' * 40}")
