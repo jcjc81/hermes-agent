@@ -82,6 +82,16 @@ def fingerprint_secret_value(value: Any) -> str | None:
     return f"sha256:{digest[:16]}"
 
 
+def _fingerprint_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    if not text:
+        return None
+    digest = hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
+    return f"sha256:{digest[:16]}"
+
+
 def fingerprint_secret_value(value: Any) -> str | None:
     """Public, non-reversible fingerprint for a single secret value.
 
