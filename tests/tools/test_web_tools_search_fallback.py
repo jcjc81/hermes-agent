@@ -118,17 +118,40 @@ class TestSearchFallbackTrigger:
 
 
 class TestFallbackOrdering:
-    """The walk is cost-first: free providers before paid/metered ones."""
+    """The walk is cost-first, with one deliberate, documented exception.
+
+    The owned, metered firecrawl pool sits BEFORE the exa/parallel keyless
+    ring: with no EXA/PARALLEL keys those slots route into a shared anonymous
+    tier (throttled, not a quota we own), while keyed firecrawl is reliable
+    and metered. See the ``_FALLBACK_PREFERENCE`` comment for the rationale.
+    """
 
     def test_fallback_preference_is_free_first(self):
         from agent.web_search_registry import _FALLBACK_PREFERENCE
 
-        free = ("brave-free", "ddgs", "searxng")
-        paid = ("exa", "tavily", "parallel", "firecrawl")
-        assert all(name in _FALLBACK_PREFERENCE for name in free + paid)
-        last_free = max(_FALLBACK_PREFERENCE.index(n) for n in free)
-        first_paid = min(_FALLBACK_PREFERENCE.index(n) for n in paid)
-        assert last_free < first_paid
+        # Free self-hosted/keyless tiers must come before any keyed/metered
+        # provider, EXCEPT that keyed firecrawl is intentionally placed before
+        # the keyless ring (see class docstring) — firecrawl is the reliable,
+        # owned pool; the ring is the throttled anonymous last resort.
+        free_self_hosted = ("searxng", "brave-free", "ddgs")
+        # Members of the anonymous keyless ring that participate in the
+        # fallback walk (keenable is ring-only and not in the walk).
+        keyless_ring = ("exa", "parallel")
+        metered = ("tavily", "perplexity")
+        assert all(name in _FALLBACK_PREFERENCE for name in free_self_hosted + keyless_ring + metered)
+        # Free self-hosted before the keyless ring and metered tiers.
+        last_free = max(_FALLBACK_PREFERENCE.index(n) for n in free_self_hosted)
+        first_ring_or_metered = min(
+            _FALLBACK_PREFERENCE.index(n) for n in keyless_ring + metered
+        )
+        assert last_free < first_ring_or_metered
+
+    def test_keyed_firecrawl_before_keyless_ring(self):
+        from agent.web_search_registry import _FALLBACK_PREFERENCE
+
+        # Keyed firecrawl is consulted before the anonymous keyless ring so a
+        # healthy owned pool serves before the throttled shared tier is reached.
+        assert _FALLBACK_PREFERENCE.index("firecrawl") < _FALLBACK_PREFERENCE.index("exa")
 
     def test_free_fallback_wins_over_paid(self):
         searxng, _ = _make_provider("searxng", results=[])
@@ -163,6 +186,40 @@ class TestFallbackOrdering:
         assert data["data"]["web"] == [_result("paid hit")]
         assert len(brave_calls) == 1
         assert len(fc_calls) == 1
+
+    def test_keyed_firecrawl_walked_before_keyless_ring(self):
+        """Regression for the firecrawl-before-exa/parallel reorder: with no
+        EXA/PARALLEL keys, the exa/parallel slots would route into the shared
+        anonymous keyless ring. The owned, metered firecrawl pool must be
+        consulted first — and the ring must never be reached when it serves."""
+        searxng, _ = _make_provider("searxng", results=[])
+        brave, _ = _make_provider("brave-free", error="402 Payment Required")
+        ddgs, _ = _make_provider("ddgs", available=False)  # not installed
+        firecrawl, fc_calls = _make_provider("firecrawl", results=[_result("keyed hit")])
+        exa, exa_calls = _make_provider("exa", results=[_result("ring hit")])
+        registry = {"searxng": searxng, "brave-free": brave, "ddgs": ddgs,
+                    "firecrawl": firecrawl, "exa": exa}
+
+        data = _run_search_tool("searxng", registry)
+
+        assert data["data"]["web"] == [_result("keyed hit")]
+        assert len(fc_calls) == 1
+        assert exa_calls == []  # keyless ring never consulted
+
+    def test_keyless_ring_catches_when_keyed_firecrawl_fails(self):
+        """The ring remains the last resort: if the keyed firecrawl pool is
+        exhausted (402), the walk must still fall through to the keyless ring."""
+        searxng, _ = _make_provider("searxng", results=[])
+        brave, _ = _make_provider("brave-free", error="402 Payment Required")
+        firecrawl, _ = _make_provider("firecrawl", error="402 Payment Required")
+        exa, exa_calls = _make_provider("exa", results=[_result("ring hit")])
+        registry = {"searxng": searxng, "brave-free": brave,
+                    "firecrawl": firecrawl, "exa": exa}
+
+        data = _run_search_tool("searxng", registry)
+
+        assert data["data"]["web"] == [_result("ring hit")]
+        assert len(exa_calls) == 1
 
 
 class TestAllFallbacksExhausted:

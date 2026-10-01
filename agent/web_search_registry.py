@@ -65,13 +65,20 @@ _LEGACY_PREFERENCE = ("firecrawl", "trafilatura", "parallel", "tavily", "perplex
 _KEYLESS_PREFERENCE = ("exa", "parallel", "firecrawl", "keenable")
 
 # Order to walk when the primary search fails at runtime OR returns zero
-# results: cost-first, free tier before paid, so an outage burns free quota
-# before paid credits. (Distinct from _LEGACY_PREFERENCE above, which preserves
-# the historical default-selection order.) Triggers on the empty-result case
-# that upstream's one-shot keyless-rescue doesn't cover (e.g. a SearXNG
-# instance whose scrape engines are all CAPTCHA-suspended answers
-# success:true with an empty list).
-_FALLBACK_PREFERENCE = ("searxng", "brave-free", "ddgs", "exa", "parallel", "tavily", "perplexity", "firecrawl")
+# results: free self-hosted/keyless tiers before paid, so an outage burns free
+# quota before paid credits. (Distinct from _LEGACY_PREFERENCE above, which
+# preserves the historical default-selection order.) Triggers on the
+# empty-result case that upstream's one-shot keyless-rescue doesn't cover
+# (e.g. a SearXNG instance whose scrape engines are all CAPTCHA-suspended
+# answers success:true with an empty list).
+#
+# ``firecrawl`` is intentionally placed BEFORE ``exa``/``parallel``: with no
+# EXA/PARALLEL API keys those slots route into the shared anonymous keyless
+# ring (throttled, a quota we do not own). The keyed firecrawl pool is a
+# reliable, metered, owned fallback, so it is consulted before the shared
+# ring. (When a FIRECRAWL_API_KEY is set, firecrawl's search() uses the keyed
+# path, not the keyless ring — see FirecrawlWebSearchProvider.search.)
+_FALLBACK_PREFERENCE = ("searxng", "brave-free", "ddgs", "firecrawl", "exa", "parallel", "tavily", "perplexity")
 
 
 def _keyless_preference() -> tuple:
