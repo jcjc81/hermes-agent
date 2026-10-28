@@ -153,7 +153,7 @@ class TestBackendFallbackRespectsCapability:
         when it's the only always-available candidate in the registry."""
         from tools import web_tools
 
-        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {})
+        monkeypatch.setattr(web_tools, "_load_web_config", dict)
         for k in (
             "TAVILY_API_KEY", "EXA_API_KEY", "PARALLEL_API_KEY",
             "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "SEARXNG_URL",
@@ -175,7 +175,7 @@ class TestBackendFallbackRespectsCapability:
         extract-only provider IS a valid extract backend."""
         from tools import web_tools
 
-        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {})
+        monkeypatch.setattr(web_tools, "_load_web_config", dict)
         for k in (
             "TAVILY_API_KEY", "EXA_API_KEY", "PARALLEL_API_KEY",
             "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "SEARXNG_URL",

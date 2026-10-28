@@ -126,7 +126,7 @@ class TestUpdateCommandGatewayFlag:
             # /update returns the confirm prompt and defers the spawn.
             pending = _slash_confirm_mod.get_pending(session_key)
             assert pending is not None, "/update must route through slash-confirm"
-            result = await _slash_confirm_mod.resolve(
+            await _slash_confirm_mod.resolve(
                 session_key, pending["confirm_id"], "once",
             )
 

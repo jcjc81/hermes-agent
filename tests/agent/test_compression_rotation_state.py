@@ -40,11 +40,11 @@ def _build_agent_with_db(
     db: SessionDB,
     session_id: str,
     platform: str = "telegram",
-    user_id: str = None,
-    chat_id: str = None,
-    chat_type: str = None,
-    thread_id: str = None,
-    gateway_session_key: str = None,
+    user_id: str | None = None,
+    chat_id: str | None = None,
+    chat_type: str | None = None,
+    thread_id: str | None = None,
+    gateway_session_key: str | None = None,
 ):
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
         from run_agent import AIAgent

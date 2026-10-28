@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import pytest
 
@@ -56,7 +56,7 @@ class FakeTrafilatura(WebSearchProvider):
 
     def __init__(self, fail_urls: Optional[set] = None):
         self.fail_urls = fail_urls or set()
-        self.calls: List[List[str]] = []
+        self.calls: list[list[str]] = []
 
     @property
     def name(self) -> str:
@@ -75,7 +75,7 @@ class FakeTrafilatura(WebSearchProvider):
     def supports_extract(self) -> bool:
         return True
 
-    def extract(self, urls: List[str], **kwargs: Any) -> List[Dict[str, Any]]:
+    def extract(self, urls: list[str], **kwargs: Any) -> list[dict[str, Any]]:
         # Sync, matching the real provider's signature.
         self.calls.append(list(urls))
         results = []
@@ -96,7 +96,7 @@ class FakeFirecrawl(WebSearchProvider):
 
     def __init__(self, fail_all: bool = False):
         self.fail_all = fail_all
-        self.calls: List[List[str]] = []
+        self.calls: list[list[str]] = []
 
     @property
     def name(self) -> str:
@@ -115,7 +115,7 @@ class FakeFirecrawl(WebSearchProvider):
     def supports_extract(self) -> bool:
         return True
 
-    async def extract(self, urls: List[str], **kwargs: Any) -> List[Dict[str, Any]]:
+    async def extract(self, urls: list[str], **kwargs: Any) -> list[dict[str, Any]]:
         # Async, matching the real Firecrawl provider's signature — the
         # dispatcher's inspect.iscoroutinefunction branch must fire.
         self.calls.append(list(urls))
@@ -307,7 +307,7 @@ def test_duplicate_urls_resolve_independently(registry, monkeypatch):
     trafilatura = FakeTrafilatura()
     firecrawl = FakeFirecrawl()
 
-    result, provider = _run_extract(
+    result, _provider = _run_extract(
         monkeypatch,
         [url, url],
         {"extract_backend": "trafilatura"},
@@ -334,7 +334,7 @@ def test_explicit_shared_backend_not_overridden_by_trafilatura_default(registry,
     trafilatura = FakeTrafilatura()
     firecrawl = FakeFirecrawl()
 
-    result, provider = _run_extract(
+    _result, provider = _run_extract(
         monkeypatch,
         [url],
         {"backend": "firecrawl"},  # shared config only, no extract_backend
@@ -363,7 +363,7 @@ def test_provider_field_reports_resolved_provider_when_batch_fails_partly(regist
     trafilatura = FakeTrafilatura(fail_urls={js_url})
     firecrawl = FakeFirecrawl()
 
-    result, provider = _run_extract(
+    _result, provider = _run_extract(
         monkeypatch,
         [static_url, js_url],
         {"extract_backend": "trafilatura"},
@@ -378,7 +378,7 @@ def test_provider_field_reports_single_provider_when_uniform(registry, monkeypat
     trafilatura = FakeTrafilatura()
     firecrawl = FakeFirecrawl()
 
-    result, provider = _run_extract(
+    _result, provider = _run_extract(
         monkeypatch,
         ["https://example.com/a", "https://example.com/b"],
         {"extract_backend": "trafilatura"},
