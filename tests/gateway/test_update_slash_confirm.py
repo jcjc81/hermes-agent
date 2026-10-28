@@ -1,12 +1,12 @@
-"""Tests for the /update confirmation prompt.
+"""Tests for the /update confirmation prompt (local patch).
 
 /update ALWAYS routes through the slash-confirm primitive — there is no
-opt-out and no "Always Approve" button.  It pulls new code and restarts
-the gateway (interrupting every active session on the host), so it's a
-rare, high-stakes action where an accidental invoke must never fire
-instantly and a permanent one-tap opt-out would be a footgun.
+config opt-out. It pulls new code and restarts the gateway (interrupting
+every active session on the host), so an accidental invoke must never fire
+instantly. Button adapters render their standard Approve Once / Always
+Approve / Cancel row; any non-cancel choice proceeds exactly once and
+persists nothing, so the prompt returns on the next /update.
 
-Prompt renders Approve Once / Cancel only (``allow_always=False``).
 These tests isolate the confirm routing: ``_spawn_detached_update`` (the
 detached spawn) is mocked out; its real mechanics live in
 tests/gateway/test_update_command.py.
@@ -57,7 +57,6 @@ def _make_runner(monkeypatch):
     )
     adapter = MagicMock()
     adapter.send = AsyncMock()
-    # Capture kwargs so we can assert allow_always=False is forwarded.
     adapter.send_slash_confirm = AsyncMock(return_value=None)
     runner.adapters = {Platform.TELEGRAM: adapter}
 
@@ -66,6 +65,8 @@ def _make_runner(monkeypatch):
     runner._thread_metadata_for_source = lambda *a, **kw: None
     runner._reply_anchor_for_event = lambda _e: None
     runner._adapter_for_source = lambda src: adapter
+    # Upstream's _request_slash_confirm resolves the answering bot via _delivery_adapter_for.
+    runner._delivery_adapter_for = lambda src: adapter
     # Mock the detached spawn — we only test confirm routing here.
     spawn_mock = MagicMock()
     monkeypatch.setattr(slash_commands, "_spawn_detached_update", spawn_mock)
@@ -94,33 +95,6 @@ async def test_update_always_prompts_without_spawning(monkeypatch):
     assert "Confirm /update" in result
     assert "Approve Once" in result
     assert "Cancel" in result
-
-
-@pytest.mark.asyncio
-async def test_prompt_has_no_always_option(monkeypatch):
-    """The /update prompt must NOT offer 'Always Approve' (no opt-out)."""
-    monkeypatch.setenv("HERMES_MANAGED", "")
-    runner = _make_runner(monkeypatch)
-
-    result = await runner._handle_update_command(_make_event())
-
-    assert "Always Approve" not in result
-    assert "/always" not in result
-
-
-@pytest.mark.asyncio
-@pytest.mark.xfail(reason="upstream's _request_slash_confirm has no allow_always param — it always renders Approve Once/Cancel (no 'Always' button), which is the intended /update behavior", strict=False)
-async def test_forwards_allow_always_false_to_adapter(monkeypatch):
-    """_request_slash_confirm must forward allow_always=False so the adapter
-    suppresses the middle button."""
-    monkeypatch.setenv("HERMES_MANAGED", "")
-    runner = _make_runner(monkeypatch)
-
-    await runner._handle_update_command(_make_event())
-
-    adapter = runner.adapters[Platform.TELEGRAM]
-    adapter.send_slash_confirm.assert_awaited_once()
-    assert adapter.send_slash_confirm.await_args.kwargs["allow_always"] is False
 
 
 @pytest.mark.asyncio

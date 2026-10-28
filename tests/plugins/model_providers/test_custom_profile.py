@@ -30,12 +30,20 @@ def custom_profile():
     honest — if the registered class is ever downgraded to a plain
     ``ProviderProfile``, the assertions below collapse.
     """
-    import model_tools  # noqa: F401
+    import model_tools
     import providers
 
     profile = providers.get_provider_profile("custom")
     assert profile is not None, "custom provider profile must be registered"
     return profile
+
+
+@pytest.fixture(autouse=True)
+def _no_live_server_probe(monkeypatch):
+    """LOCAL PATCH (vLLM/llama.cpp clamp): the profile probes base_url to detect a
+    templated backend. Default every test to "undetected" so none of them makes a real
+    HTTP request; the clamp tests below override this per test."""
+    monkeypatch.setattr("agent.model_metadata.detect_local_server_type", lambda *a, **k: None)
 
 
 class TestCustomReasoningWireShape:
@@ -169,6 +177,25 @@ class TestCustomReasoningWireShape:
         )
         assert eb.get("think") is not True
 
+    @pytest.mark.parametrize(
+        "reasoning_config, expected",
+        [({"enabled": True, "effort": "high"}, "default"), ({"enabled": False, "effort": "medium"}, "none")],
+    )
+    def test_groq_host_clamps_effort_to_groq_vocabulary(self, custom_profile, reasoning_config, expected):
+        """api.groq.com accepts top-level reasoning_effort only as 'none' / 'default' (#75089).
+
+        Drives the main transport so the clamp is proven where production reads it.
+        """
+        from agent.transports.chat_completions import ChatCompletionsTransport
+
+        kwargs = ChatCompletionsTransport().build_kwargs(
+            model="qwen/qwen3.6-27b", messages=[{"role": "user", "content": "ping"}], tools=None,
+            provider_profile=custom_profile, reasoning_config=reasoning_config,
+            base_url="https://api.groq.com/openai/v1", provider_name="custom",
+        )
+        assert kwargs["reasoning_effort"] == expected
+        assert "think" not in kwargs.get("extra_body", {}) and "reasoning" not in kwargs.get("extra_body", {})
+
 
 class TestCustomReasoningWithNumCtx:
     """Ollama num_ctx and reasoning are independent and compose."""
@@ -181,169 +208,131 @@ class TestCustomReasoningWithNumCtx:
         assert tl == {}
 
 
+class TestCustomResponsesEffortVocabulary:
+    """The Responses transport honours a custom endpoint's configured ``max`` (#114249).
 
-class TestVLLMLlamaCppClamp:
-    """Detected vLLM/llama.cpp: clamp Hermes-only effort levels to the
-    OpenAI-compatible enum and emit chat_template_kwargs.enable_thinking.
-
-    Regression guard: without the clamp, xhigh/max/minimal → HTTP 400 on
-    vLLM (confirmed against a live 192.168.12.129:8000 Qwen3.6-27B server).
-    Without chat_template_kwargs, reasoning_effort alone does not make the
-    chat template actually emit reasoning content.
-
-    Re-landed post-merge (upstream's refactor dropped the templated-backend
-    branch from custom/__init__.py); these tests guard the restored clamp.
+    A custom relay's models are not on the OpenAI per-model ladder; without the
+    profile declaration the Responses transport clamped a configured ``max`` to
+    ``xhigh`` while chat-completions on the same provider forwarded ``max``.
     """
 
-    @pytest.fixture
-    def profile(self):
-        import model_tools  # noqa: F401
-        import providers
+    def test_named_relay_keeps_configured_max_where_chat_completions_does(self, custom_profile):
+        from agent.transports.codex import _resolve_reasoning
 
-        return providers.get_provider_profile("custom")
+        reasoning = {"enabled": True, "effort": "max"}
+        _, top_level = custom_profile.build_api_kwargs_extras(
+            reasoning_config=reasoning, base_url="https://relay.example/v1"
+        )
+        effort, enabled = _resolve_reasoning(
+            "deepseek-flash",
+            {"provider": "custom:relay", "base_url": "https://relay.example/v1", "reasoning_config": reasoning},
+        )
+        assert (effort, enabled) == (top_level["reasoning_effort"], True) == ("max", True)
+
+    def test_custom_entry_at_the_official_openai_origin_keeps_the_per_model_ladder(self):
+        """api.openai.com's vocabulary is known per model; the custom declaration must not
+        put ``max`` on the wire for a slug OpenAI rejects it on."""
+        from agent.transports.codex import _resolve_reasoning
+
+        effort, enabled = _resolve_reasoning(
+            "gpt-5.2",
+            {
+                "provider": "custom:oai",
+                "base_url": "https://api.openai.com/v1",
+                "reasoning_config": {"enabled": True, "effort": "max"},
+            },
+        )
+        assert (effort, enabled) == ("xhigh", True)
+
+
+_VLLM_URL = "http://192.168.12.129:8000/v1"
+
+
+def _detect_as(monkeypatch, server_type):
+    monkeypatch.setattr("agent.model_metadata.detect_local_server_type", lambda *a, **k: server_type)
+
+
+class TestVLLMLlamaCppClamp:
+    """LOCAL PATCH: detected vLLM/llama.cpp clamp Hermes-only effort levels to the OpenAI
+    4-level enum and emit chat_template_kwargs.enable_thinking.
+
+    Without the clamp, xhigh/max/minimal are an HTTP 400 on vLLM (confirmed against the live
+    192.168.12.129:8000 Qwen server). Without chat_template_kwargs, reasoning_effort alone does
+    not make the chat template emit reasoning content.
+    """
 
     @pytest.mark.parametrize("server_type", ["vllm", "llamacpp"])
     @pytest.mark.parametrize(
         "effort,expected",
-        [
-            ("minimal", "low"),
-            ("low", "low"),
-            ("medium", "medium"),
-            ("high", "high"),
-            ("xhigh", "high"),
-            ("max", "high"),
-        ],
+        [("minimal", "low"), ("low", "low"), ("medium", "medium"), ("high", "high"),
+         ("xhigh", "high"), ("max", "high")],
     )
-    def test_clamps_hermes_levels(
-        self, profile, monkeypatch, server_type, effort, expected
-    ):
-        """Both vLLM and llama.cpp clamp xhigh/max → high, minimal → low,
-        and both get enable_thinking=True — chat_template_kwargs is a
-        chat-template concept both backends understand."""
-        monkeypatch.setattr(
-            "agent.model_metadata.detect_local_server_type",
-            lambda *a, **k: server_type,
-        )
-        eb, tl = profile.build_api_kwargs_extras(
-            reasoning_config={"enabled": True, "effort": effort},
-            base_url="http://192.168.12.129:8000/v1",
-            model="qwen3",
+    def test_clamps_hermes_levels(self, custom_profile, monkeypatch, server_type, effort, expected):
+        _detect_as(monkeypatch, server_type)
+        eb, tl = custom_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": effort}, base_url=_VLLM_URL, model="qwen3",
         )
         assert tl == {"reasoning_effort": expected}
         assert eb["chat_template_kwargs"] == {"enable_thinking": True}
 
     @pytest.mark.parametrize("server_type", ["vllm", "llamacpp"])
-    def test_disabled_emits_enable_thinking_false(
-        self, profile, monkeypatch, server_type
-    ):
-        """When reasoning is disabled, detected vLLM/llama.cpp get
-        enable_thinking=False (the key they actually honor). think=False is
-        Ollama-only (#31f0336 upstream gating) so a vLLM URL must NOT carry it
-        — vLLM/llama.cpp 422 on the unknown field."""
-        monkeypatch.setattr(
-            "agent.model_metadata.detect_local_server_type",
-            lambda *a, **k: server_type,
+    def test_disabled_emits_enable_thinking_false(self, custom_profile, monkeypatch, server_type):
+        """Disabled -> enable_thinking=False (the key these backends honor); think=False stays
+        Ollama-only because vLLM/llama.cpp 422 on the unknown field."""
+        _detect_as(monkeypatch, server_type)
+        eb, tl = custom_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": False}, base_url=_VLLM_URL, model="qwen3",
         )
-        eb, tl = profile.build_api_kwargs_extras(
-            reasoning_config={"enabled": False},
-            base_url="http://192.168.12.129:8000/v1",
-            model="qwen3",
-        )
-        # vLLM URL: chat_template_kwargs.enable_thinking=False, no think field
         assert eb == {"chat_template_kwargs": {"enable_thinking": False}}
-        assert "think" not in eb, "think must be Ollama-only (upstream #31f0336)"
-        # disabled always emits reasoning_effort="none" top-level (Ollama /v1
-        # ignores extra_body.think but honours top-level reasoning_effort, #25758)
         assert tl == {"reasoning_effort": "none"}
 
     @pytest.mark.parametrize("server_type", ["vllm", "llamacpp"])
-    def test_unrecognized_effort_defaults_to_high(
-        self, profile, monkeypatch, server_type
-    ):
-        """An effort string not in the clamp table falls back to 'high'
-        (the safe/most-capable default) rather than passing through an
-        arbitrary unvalidated string to a backend known to 400 on it."""
-        monkeypatch.setattr(
-            "agent.model_metadata.detect_local_server_type",
-            lambda *a, **k: server_type,
-        )
-        eb, tl = profile.build_api_kwargs_extras(
-            reasoning_config={"enabled": True, "effort": "ultra"},
-            base_url="http://192.168.12.129:8000/v1",
-            model="qwen3",
+    def test_ultra_clamps_to_high(self, custom_profile, monkeypatch, server_type):
+        _detect_as(monkeypatch, server_type)
+        eb, tl = custom_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": "ultra"}, base_url=_VLLM_URL, model="qwen3",
         )
         assert tl == {"reasoning_effort": "high"}
         assert eb["chat_template_kwargs"] == {"enable_thinking": True}
 
 
 class TestNonTemplatedCustomPassthrough:
-    """GLM/ARK, Ollama, and unknown/undetected backends: reasoning_effort
-    passes through verbatim, no chat_template_kwargs emitted.
-
-    Regression guard: GLM-5.2/ARK natively accept max/xhigh and would break
-    if clamped; Ollama doesn't understand chat_template_kwargs.
-
-    Re-landed post-merge (upstream's refactor dropped the templated-backend
-    branch from custom/__init__.py); these tests guard the restored clamp.
-    """
-
-    @pytest.fixture
-    def profile(self):
-        import model_tools  # noqa: F401
-        import providers
-
-        return providers.get_provider_profile("custom")
+    """LOCAL PATCH guard: GLM/ARK, Ollama and undetected backends keep upstream's generic path
+    (wide OpenAI-compat vocabulary, no chat_template_kwargs). GLM-5.2/ARK accept max/xhigh
+    natively and would break if clamped; Ollama does not understand chat_template_kwargs."""
 
     @pytest.mark.parametrize(
         "server_type,effort",
-        [
-            (None, "xhigh"),
-            (None, "max"),
-            ("ollama", "xhigh"),
-            ("unknown-backend", "minimal"),
-        ],
+        [(None, "xhigh"), (None, "max"), ("ollama", "xhigh"), ("unknown-backend", "minimal")],
     )
-    def test_passthrough_when_not_templated(
-        self, profile, monkeypatch, server_type, effort
-    ):
-        monkeypatch.setattr(
-            "agent.model_metadata.detect_local_server_type",
-            lambda *a, **k: server_type,
-        )
-        eb, tl = profile.build_api_kwargs_extras(
-            reasoning_config={"enabled": True, "effort": effort},
-            base_url="http://example.com/v1",
+    def test_passthrough_when_not_templated(self, custom_profile, monkeypatch, server_type, effort):
+        _detect_as(monkeypatch, server_type)
+        eb, tl = custom_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": effort}, base_url="http://example.com/v1",
             model="glm-5.2",
         )
         assert tl == {"reasoning_effort": effort}
         assert "chat_template_kwargs" not in eb
 
-    def test_no_base_url_bypasses_detection(self, profile):
-        """No base_url and no profile-level default → detection skipped
-        entirely → verbatim passthrough (matches the pre-existing tests in
-        TestCustomReasoningWireShape which never pass base_url)."""
-        eb, tl = profile.build_api_kwargs_extras(
-            reasoning_config={"enabled": True, "effort": "xhigh"},
-            model="glm-5.2",
+    def test_no_base_url_skips_detection(self, custom_profile, monkeypatch):
+        def _must_not_probe(*a, **k):
+            raise AssertionError("detection must not run without a base_url")
+
+        monkeypatch.setattr("agent.model_metadata.detect_local_server_type", _must_not_probe)
+        eb, tl = custom_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": "xhigh"}, model="glm-5.2",
         )
         assert tl == {"reasoning_effort": "xhigh"}
         assert "chat_template_kwargs" not in eb
 
-    def test_detection_failure_falls_back_to_passthrough(self, profile, monkeypatch):
-        """If detect_local_server_type raises (network blip, timeout), the
-        best-effort try/except must leave _server_type None, NOT propagate
-        the exception — a transient probe failure must never crash a
-        chat-completion request."""
+    def test_detection_failure_falls_back_to_passthrough(self, custom_profile, monkeypatch):
+        """A probe failure (network blip, timeout) must never crash a chat-completion request."""
         def _raise(*a, **k):
             raise TimeoutError("probe timed out")
 
-        monkeypatch.setattr(
-            "agent.model_metadata.detect_local_server_type", _raise
-        )
-        eb, tl = profile.build_api_kwargs_extras(
-            reasoning_config={"enabled": True, "effort": "xhigh"},
-            base_url="http://192.168.12.129:8000/v1",
-            model="qwen3",
+        monkeypatch.setattr("agent.model_metadata.detect_local_server_type", _raise)
+        eb, tl = custom_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": "xhigh"}, base_url=_VLLM_URL, model="qwen3",
         )
         assert tl == {"reasoning_effort": "xhigh"}
         assert "chat_template_kwargs" not in eb

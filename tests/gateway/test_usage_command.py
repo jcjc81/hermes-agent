@@ -2,7 +2,6 @@ from hermes_state import AsyncSessionDB
 """Tests for gateway /usage command — agent cache lookup and output fields."""
 
 import threading
-from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -78,9 +77,7 @@ class TestUsageCachedAgent:
         runner = _make_runner(SK, cached_agent=agent)
         event = MagicMock()
 
-        with patch("agent.rate_limit_tracker.format_rate_limit_compact", return_value="RPM: 50/60"), \
-             patch("agent.usage_pricing.estimate_usage_cost") as mock_cost:
-            mock_cost.return_value = MagicMock(amount_usd=None, status="unknown")
+        with patch("agent.rate_limit_tracker.format_rate_limit_compact", return_value="RPM: 50/60"):
             result = await runner._handle_usage_command(event)
 
         assert "claude-sonnet-4.6" in result
@@ -89,26 +86,6 @@ class TestUsageCachedAgent:
         assert "50,000" in result  # total
         assert "30,000" in result  # context
         assert "Compressions: 1" in result
-        # Cache read/write tokens are restored (#52717 regression fix).
-        assert "Cache read tokens: 5,000" in result
-        assert "Cache write tokens: 2,000" in result
-        # Cost hidden when pricing is unknown for the model — never a fabricated $0.00.
-        assert "$" not in result
-        assert "Cost" not in result
-
-    @pytest.mark.asyncio
-    async def test_cached_agent_shows_cost_when_pricing_known(self):
-        """Cost line renders when estimate_usage_cost resolves a real price."""
-        agent = _make_mock_agent()
-        runner = _make_runner(SK, cached_agent=agent)
-        event = MagicMock()
-
-        with patch("agent.rate_limit_tracker.format_rate_limit_compact", return_value="RPM: 50/60"), \
-             patch("agent.usage_pricing.estimate_usage_cost") as mock_cost:
-            mock_cost.return_value = MagicMock(amount_usd=Decimal("0.1234"), status="estimated")
-            result = await runner._handle_usage_command(event)
-
-        assert "Cost: ~$0.1234" in result
 
     @pytest.mark.asyncio
     async def test_running_agent_preferred_over_cache(self):
@@ -127,8 +104,52 @@ class TestUsageCachedAgent:
         assert "API calls: 10" in result
 
 
+class TestUsageCacheAndCostLocalPatch:
+    """LOCAL PATCH (/usage cache + cost): cache read/write rows and the session cost,
+    restored after upstream removed them in #52717. Cost is the agent's running per-call
+    total (session_estimated_cost_usd), shown only when the pricing status is known."""
+
+    async def _usage(self, **overrides):
+        agent = _make_mock_agent(**overrides)
+        runner = _make_runner(SK, cached_agent=agent)
+        with patch("agent.rate_limit_tracker.format_rate_limit_compact", return_value="RPM: 50/60"):
+            return await runner._handle_usage_command(MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_cache_rows_shown_and_unknown_cost_hidden(self):
+        result = await self._usage(session_cost_status="unknown", session_estimated_cost_usd=0.0)
+        assert "Cache read tokens: 5,000" in result
+        assert "Cache write tokens: 2,000" in result
+        # No pricing for the model -> never a fabricated $0.00.
+        assert "$" not in result
+        assert "Cost" not in result
+
+    @pytest.mark.asyncio
+    async def test_cache_rows_hidden_when_zero(self):
+        result = await self._usage(session_cache_read_tokens=0, session_cache_write_tokens=0,
+                                   session_cost_status="unknown")
+        assert "Cache read" not in result
+        assert "Cache write" not in result
+
+    @pytest.mark.asyncio
+    async def test_estimated_cost_shown_from_running_total(self):
+        result = await self._usage(session_cost_status="estimated", session_estimated_cost_usd=0.1234)
+        assert "Cost: ~$0.1234" in result
+
+    @pytest.mark.asyncio
+    async def test_actual_cost_has_no_tilde(self):
+        result = await self._usage(session_cost_status="actual", session_estimated_cost_usd=1.5)
+        assert "Cost: $1.5000" in result
+
+    @pytest.mark.asyncio
+    async def test_included_route_says_included(self):
+        result = await self._usage(session_cost_status="included", session_estimated_cost_usd=0.0)
+        assert "Cost: included" in result
+
+
 class TestUsageAccountSection:
     """Account-limits section appended to /usage output (PR #2486)."""
+
 
     @pytest.mark.asyncio
     async def test_usage_command_uses_persisted_provider_when_agent_not_running(self, monkeypatch):
@@ -176,18 +197,54 @@ class TestUsageAccountSection:
 
         account_call = next(c for c in calls if c["args"] == ("openai-codex",))
         assert account_call["kwargs"]["base_url"] == "https://chatgpt.com/backend-api/codex"
-        assert "📊 **Session Info**" in result
         assert "📈 **Account limits**" in result
 
     @pytest.mark.asyncio
-    async def test_usage_command_prefers_dominant_persisted_route(self, monkeypatch):
+    async def test_usage_command_falls_back_to_configured_provider_without_history(self, monkeypatch):
+        """#15167: no agent, no persisted route, empty transcript -> still fetch account limits
+        for the configured provider instead of the bare "no data" stub."""
+        runner = _make_runner(SK)
+        runner._session_db = AsyncSessionDB(MagicMock())
+        runner._session_db._db.get_session.return_value = {}
+        runner._session_db._db.get_recent_session_model_route.return_value = None
+        session_entry = MagicMock()
+        session_entry.session_id = "sess-fresh"
+        runner.session_store.get_or_create_session.return_value = session_entry
+        runner.session_store.load_transcript.return_value = []
+
+        calls = []
+
+        async def _fake_to_thread(fn, *args, **kwargs):
+            calls.append({"fn": fn, "args": args, "kwargs": kwargs})
+            return fn(*args, **kwargs)
+
+        monkeypatch.setattr("gateway.run.asyncio.to_thread", _fake_to_thread)
+        monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {"model": {"provider": "openai-codex"}})
+        monkeypatch.setattr(
+            "gateway.slash_commands_status.fetch_account_usage",
+            lambda provider, base_url=None, api_key=None: object(),
+        )
+        monkeypatch.setattr(
+            "gateway.slash_commands_status.render_account_usage_lines",
+            lambda snapshot, markdown=False: ["📈 **Account limits**", "Provider: openai-codex (Plus)",
+                                              "Weekly: 91% remaining (9% used)"],
+        )
+        monkeypatch.setattr("agent.account_usage.nous_credits_lines", lambda markdown=False: [])
+
+        result = await runner._handle_usage_command(MagicMock())
+
+        assert any(c["args"] == ("openai-codex",) for c in calls)
+        assert "📈 **Account limits**" in result and "Weekly: 91% remaining" in result
+
+    @pytest.mark.asyncio
+    async def test_usage_command_prefers_recent_persisted_route(self, monkeypatch):
         runner = _make_runner(SK)
         runner._session_db = AsyncSessionDB(MagicMock())
         runner._session_db._db.get_session.return_value = {
             "billing_provider": "nous",
             "billing_base_url": "https://inference-api.nousresearch.com/v1/",
         }
-        runner._session_db._db.get_dominant_session_model_route.return_value = {
+        runner._session_db._db.get_recent_session_model_route.return_value = {
             "model": "z-ai/glm-5.2",
             "billing_provider": "nvidia",
             "billing_base_url": "https://integrate.api.nvidia.com/v1/",
