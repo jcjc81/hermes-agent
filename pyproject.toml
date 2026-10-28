@@ -236,6 +236,9 @@ exa = ["exa-py==2.10.2"]
 firecrawl = ["firecrawl-py==4.17.0"]
 parallel-web = ["parallel-web==0.4.2"]
 ddgs = ["ddgs==9.16.0"]
+# LOCAL PATCH: trafilatura is the extract backend on every profile (web.extract_backend).
+# Hand-installed until now, so any uv sync from uv.lock removed it; [all] below carries it.
+trafilatura = ["trafilatura==2.2.0"]
 # Image generation backends
 fal = ["fal-client==0.13.1"]
 # Edge TTS — default TTS provider but still optional (users can pick
@@ -525,6 +528,7 @@ all = [
   "hermes-agent[google]",
   "hermes-agent[web]",
   "hermes-agent[youtube]",
+  "hermes-agent[trafilatura]",  # LOCAL PATCH: see the trafilatura extra
 ]
 
 [dependency-groups]
