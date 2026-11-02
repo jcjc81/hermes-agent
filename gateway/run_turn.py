@@ -73,8 +73,8 @@ class GatewayTurnMixin:
                 )
             }
             override_runtime["capabilities"] = dict(override_runtime["capabilities"] or {})
-            key_env = override.get("key_env") or ""
-            if key_env:
+            key_env = override.get("key_env")
+            if isinstance(key_env, str) and key_env:
                 # Alias-bound credential: re-read the bound var (rotation-safe), no provider pool
                 # (rotation would move the session onto a different account), and hand the var
                 # name to the agent so its per-request refresh re-reads only that var.

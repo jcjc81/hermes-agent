@@ -181,7 +181,8 @@ class GatewayAgentCacheMixin:
         # Alias-bound credential: re-read the persisted var NAME, never the provider default (that
         # key may bill a different account). _resolve_session_agent_runtime re-reads it every turn
         # and fails loudly when it is empty.
-        key_env = (persisted.get("key_env") or "").strip()
+        key_env = persisted.get("key_env")
+        key_env = key_env.strip() if isinstance(key_env, str) else ""
         if key_env:
             override["key_env"] = key_env
         if provider:

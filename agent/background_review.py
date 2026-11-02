@@ -214,7 +214,7 @@ def _resolve_review_runtime(agent: Any, task_cfg: Optional[Dict[str, Any]] = Non
         "api_mode": "codex_responses" if parent_api_mode == "codex_app_server" else parent_api_mode,
         "credential_pool": getattr(agent, "_credential_pool", None),
         # Same key as the parent → same binding (see client_lifecycle credential refresh).
-        "api_key_env": getattr(agent, "_api_key_env", "") or "",
+        "api_key_env": _key_env if isinstance(_key_env := getattr(agent, "_api_key_env", ""), str) else "",
         "request_overrides": dict(getattr(agent, "request_overrides", {}) or {}),
         "max_tokens": getattr(agent, "max_tokens", None), "command": getattr(agent, "acp_command", None),
         "args": list(getattr(agent, "acp_args", []) or []), "routed": False,

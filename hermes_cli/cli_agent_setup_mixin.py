@@ -43,7 +43,7 @@ def _current_runtime(cli) -> dict:
         "args": list(cli.acp_args or []),
         "credential_pool": getattr(cli, "_credential_pool", None),
         # model_aliases key_env: the agent's credential refresh re-reads only this var.
-        "api_key_env": getattr(cli, "_api_key_env", "") or ""}
+        "api_key_env": _key_env if isinstance(_key_env := getattr(cli, "_api_key_env", ""), str) else ""}
 
 
 def _route_signature(model, runtime: dict) -> tuple:

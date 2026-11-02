@@ -2272,7 +2272,7 @@ def init_agent(
         if isinstance(key, str) and isinstance(value, bool)
     }
     agent._credential_pool = credential_pool
-    agent._api_key_env = (api_key_env or "").strip()
+    agent._api_key_env = api_key_env.strip() if isinstance(api_key_env, str) else ""
     if agent._api_key_env and credential_pool is not None:
         # Alias-bound credential: provider pool rotation would swap in a different account's key.
         agent._credential_pool = credential_pool = None

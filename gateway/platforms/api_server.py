@@ -2056,7 +2056,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 _clean_request_string(session_override.get("provider")) or current_provider,
                 target_model=model)
             _apply_runtime_agent_overrides(runtime_kwargs, session_override)
-            if session_override.get("key_env"):
+            if isinstance(session_override.get("key_env"), str) and session_override["key_env"]:
                 # Alias-bound credential (see gateway.run_agent_cache.read_override_key_env): never the
                 # provider default or its pool — those may bill a different account. Fails loudly if unset.
                 from gateway.run_agent_cache import read_override_key_env

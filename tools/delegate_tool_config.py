@@ -496,8 +496,9 @@ def _resolve_child_runtime(
         kwargs["provider_data_collection"] = kwargs["provider_data_collection"] or ""
     # A child running on the parent's own alias-bound key keeps the binding, so its per-request credential
     # refresh re-reads that var instead of swapping in the provider-default key (a different account).
-    parent_key_env = getattr(parent_agent, "_api_key_env", "") or ""
-    if parent_key_env and not override_api_key and kwargs["api_key"] == getattr(parent_agent, "api_key", None):
+    parent_key_env = getattr(parent_agent, "_api_key_env", "")
+    if (isinstance(parent_key_env, str) and parent_key_env and not override_api_key
+            and kwargs["api_key"] == getattr(parent_agent, "api_key", None)):
         kwargs["api_key_env"] = parent_key_env
     child_max_tokens = override_max_tokens if override_max_tokens is not None else getattr(parent_agent, "max_tokens", None)
     if isinstance(child_max_tokens, int):
