@@ -798,9 +798,18 @@ class ClientLifecycleMixin:
             or base_url_host_matches(getattr(self, "_anthropic_base_url", "") or "", "azure.com")
         ):
             return False
+        key_env = getattr(self, "_api_key_env", "") or ""
         try:
-            from agent.anthropic_credentials import resolve_anthropic_token
-            new_token = resolve_anthropic_token()
+            if key_env:
+                # Alias-bound credential (model_aliases key_env): re-read ONLY that var so a rotated
+                # key is picked up without ever swapping in the provider-default token chain
+                # (ANTHROPIC_TOKEN / ANTHROPIC_API_KEY / Claude Code creds) — that would silently
+                # bill a different account than the one the user selected.
+                from agent.secret_scope import get_secret
+                new_token = get_secret(key_env, "")
+            else:
+                from agent.anthropic_credentials import resolve_anthropic_token
+                new_token = resolve_anthropic_token()
         except Exception as exc:
             logger.debug("Anthropic credential refresh failed: %s", exc)
             return False
@@ -815,7 +824,13 @@ class ClientLifecycleMixin:
         except Exception as exc:
             logger.warning("Failed to rebuild Anthropic client after credential refresh: %s", exc)
             return False
+        old_token = self._anthropic_api_key
         self._anthropic_api_key, self._is_anthropic_oauth = new_token, self._anthropic_oauth_flag(new_token)
+        if key_env:
+            # Rotated alias key: auxiliary calls (compression, titles) read agent.api_key — move it too.
+            if getattr(self, "api_key", None) == old_token:
+                self.api_key = new_token
+            logger.info("Anthropic credential refreshed from %s (rotated value)", key_env)
         return True
 
     # ------------------------------------------------------------------ route-derived client config

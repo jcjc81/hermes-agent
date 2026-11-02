@@ -174,7 +174,8 @@ def _commit_agent_switch(sid: str, session: dict, agent, result, current_model: 
         agent.switch_model(
             new_model=result.new_model, new_provider=result.target_provider, api_key=result.api_key,
             base_url=result.base_url, api_mode=result.api_mode,
-            capabilities=getattr(result, "runtime_capabilities", None))
+            capabilities=getattr(result, "runtime_capabilities", None),
+            api_key_env=getattr(result, "key_env", "") or "")
     except Exception as exc:
         # The in-place swap rolled the agent back and re-raised. Abort the whole commit (worker
         # restart, persist, marker, override, config write) or the session pins a broken model.

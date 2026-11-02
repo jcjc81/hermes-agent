@@ -890,6 +890,9 @@ def _apply_primary_runtime_fields(agent, rt: Dict[str, Any]) -> None:
     if hasattr(agent, "_transport_cache"):
         agent._transport_cache.clear()
     agent.api_key = rt["api_key"]
+    # Absent in pre-key_env snapshots: keep the live binding rather than erasing it.
+    if "api_key_env" in rt:
+        agent._api_key_env = rt["api_key_env"] or ""
     agent._reasoning_echo_flag = rt.get("reasoning_echo_flag", False)
     agent.request_overrides = dict(rt.get("request_overrides") or {})
     agent._client_kwargs = dict(rt["client_kwargs"])
@@ -1069,6 +1072,12 @@ def _rebind_primary_credential_pool(agent, primary_provider, matches_primary, lo
     fallback attaches its own pool, which would trip the provider-mismatch guard on the next
     401/429: reload the primary pool, else clear it. The snapshot api_key may be stale after
     rotation; re-select the pool's best entry, keeping the snapshot key when none is usable."""
+    if getattr(agent, "_api_key_env", ""):
+        # Alias-bound credential (restored above from the snapshot): no provider pool, no re-select —
+        # pool entries are provider-default keys for a different account.
+        agent._credential_pool = None
+        agent._credential_pool_entry_id = None
+        return
     pool = getattr(agent, "_credential_pool", None)
     pool_provider = str(getattr(pool, "provider", "") or "").strip().lower()
     if pool is not None and pool_provider and not matches_primary(pool):
@@ -1788,7 +1797,7 @@ _SWITCH_SNAPSHOT_FIELDS = (
     "model", "provider", "requested_provider", "base_url", "api_mode", "api_key", "client",
     "_anthropic_client", "_anthropic_api_key", "_anthropic_base_url", "_is_anthropic_oauth",
     "_config_context_length", "_reasoning_echo_flag", "runtime_capabilities",
-    "_credential_pool", "_credential_pool_entry_id",
+    "_credential_pool", "_credential_pool_entry_id", "_api_key_env",
 )
 _MISSING = object()
 
@@ -1866,7 +1875,9 @@ def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new
         # Only fall back to ANTHROPIC_TOKEN for native Anthropic; other anthropic_messages providers
         # must never receive Anthropic credentials.
         is_native_anthropic = new_provider == "anthropic"
-        effective_key = api_key or agent.api_key or (resolve_anthropic_token() if is_native_anthropic else "") or ""
+        # An alias-bound key (key_env) never borrows the provider-default token chain.
+        default_chain_ok = is_native_anthropic and not getattr(agent, "_api_key_env", "")
+        effective_key = api_key or agent.api_key or (resolve_anthropic_token() if default_chain_ok else "") or ""
         # MiniMax OAuth: per-request callable token provider survives 15-min expiry (rationale in
         # agent_init.py).
         if new_provider == "minimax-oauth" and isinstance(effective_key, str) and effective_key:
@@ -1940,9 +1951,14 @@ def _swap_switch_runtime(agent, new_model, new_provider, api_key, base_url, api_
         agent._transport_cache.clear()
     if api_key:
         agent.api_key = api_key
+    if getattr(agent, "_api_key_env", ""):
+        # Alias-bound credential: the provider pool holds only provider-default keys, so a 429/billing
+        # rotation would silently move this session onto a different account. No pool, no rotation.
+        agent._credential_pool = None
+        agent._credential_pool_entry_id = None
     # Reload the credential pool on provider change: a pool with a mismatched provider makes
     # recover_with_credential_pool short-circuit. Reload failure is non-fatal.
-    if old_norm != new_norm or getattr(agent, "_credential_pool", None) is None:
+    elif old_norm != new_norm or getattr(agent, "_credential_pool", None) is None:
         # A pool bound to the old provider is worse than none: the recovery guard rejects it.
         agent._credential_pool = None
         agent._credential_pool_entry_id = None
@@ -2041,6 +2057,7 @@ def _build_primary_runtime_snapshot(agent, api_mode) -> Dict[str, Any]:
         # See #75091.
         "request_overrides": dict(getattr(agent, "request_overrides", {}) or {}),
         "runtime_capabilities": dict(getattr(agent, "runtime_capabilities", {}) or {}),
+        "api_key_env": getattr(agent, "_api_key_env", "") or "",
         "compressor_model": getattr(cc, "model", agent.model),
         "compressor_base_url": getattr(cc, "base_url", agent.base_url),
         "compressor_api_key": getattr(cc, "api_key", ""),
@@ -2098,12 +2115,14 @@ def _persist_switch_billing_route(agent) -> None:
 
 
 def switch_model(
-    agent, new_model, new_provider, api_key='', base_url='', api_mode='', capabilities=None
+    agent, new_model, new_provider, api_key='', base_url='', api_mode='', capabilities=None,
+    api_key_env='',
 ):
     """Switch the model/provider in-place for a live agent (rebuild clients, caching flags,
     compressor). Mirrors ``_try_activate_fallback()`` but also updates ``_primary_runtime`` so
     the change persists across turns. A failed swap/rebuild rolls back to the pre-switch
-    snapshot and re-raises (callers catch)."""
+    snapshot and re-raises (callers catch). ``api_key_env`` binds the credential to that env var
+    (alias ``key_env``); empty clears any previous binding."""
     old_model = agent.model
     old_provider = agent.provider
     # ── Reload credential pool for the new provider (issue #52727) ── Without this,
@@ -2119,6 +2138,7 @@ def switch_model(
     )
     snapshot = _snapshot_switch_state(agent)
     try:
+        agent._api_key_env = (api_key_env or "").strip()
         _swap_switch_runtime(
             agent, new_model, new_provider, api_key, base_url, api_mode, old_provider, old_norm, new_norm
         )

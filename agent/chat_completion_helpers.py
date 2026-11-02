@@ -2008,6 +2008,9 @@ def _should_skip_fallback_candidate(agent, fb: dict, fb_key: tuple, fb_provider:
 
 def _swap_fallback_clients(agent, fb_client, fb_provider: str, fb_model: str, fb_base_url: str, fb_api_mode: str) -> None:
     """Install the fallback client(s) in place, honoring request_timeout_seconds (None = SDK default)."""
+    # The fallback carries its own credential; the primary's key_env binding must not follow it
+    # (restore_primary_runtime puts it back from _primary_runtime).
+    agent._api_key_env = ""
     timeout = get_provider_request_timeout(fb_provider, fb_model)
     if fb_api_mode == "anthropic_messages":
         from agent.anthropic_adapter import build_anthropic_client

@@ -447,7 +447,9 @@ def build_session_context_prompt(context: SessionContext, *, redact_pii: bool = 
 
 
 # /model override keys safe to persist; ``api_key``/``api_mode`` must NEVER reach sessions.json.
-PERSISTABLE_MODEL_OVERRIDE_KEYS = ("model", "provider", "base_url")
+# ``key_env`` is the NAME of the env var an alias credential lives in (never its value), so a restart
+# re-reads that var instead of re-resolving the provider-default key.
+PERSISTABLE_MODEL_OVERRIDE_KEYS = ("model", "provider", "base_url", "key_env")
 
 
 def sanitize_model_override(override: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:

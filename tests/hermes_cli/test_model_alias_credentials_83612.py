@@ -444,6 +444,36 @@ class TestCredentialPrecedenceIsExplicit:
         assert direct_alias_api_key(alias) == "sk-from-key-env"
 
 
+class TestSwitchResultCarriesKeyEnvName:
+    """The switch result names the env var the alias key came from, so callers can bind the
+    session to it (per-request refresh / restart re-read that var, never the provider default)."""
+
+    def test_key_env_alias_reports_its_var(self, monkeypatch):
+        monkeypatch.setenv("THETA_API_KEY", "sk-theta-from-env")
+        result, _ = _switch_to_alias(monkeypatch, {
+            "model": "theta-1", "provider": "custom", "base_url": ALIAS_HOST, "key_env": "THETA_API_KEY",
+        })
+        assert result.success, result.error_message
+        assert result.api_key == "sk-theta-from-env"
+        assert result.key_env == "THETA_API_KEY"
+
+    def test_env_template_alias_reports_its_var(self, monkeypatch):
+        monkeypatch.setenv("THETA_TEMPLATE_KEY", "sk-theta-template")
+        result, _ = _switch_to_alias(monkeypatch, {
+            "model": "theta-1", "provider": "custom", "base_url": ALIAS_HOST,
+            "api_key": "${THETA_TEMPLATE_KEY}",
+        })
+        assert result.success, result.error_message
+        assert result.key_env == "THETA_TEMPLATE_KEY"
+
+    def test_literal_key_alias_has_no_var(self, monkeypatch):
+        result, _ = _switch_to_alias(monkeypatch, {
+            "model": "theta-1", "provider": "custom", "base_url": ALIAS_HOST, "api_key": "sk-literal",
+        })
+        assert result.success, result.error_message
+        assert result.key_env == ""
+
+
 class TestSchemelessBaseUrls:
     """Scheme-less base URLs.
 

@@ -73,6 +73,20 @@ class GatewayTurnMixin:
                 )
             }
             override_runtime["capabilities"] = dict(override_runtime["capabilities"] or {})
+            key_env = override.get("key_env") or ""
+            if key_env:
+                # Alias-bound credential: re-read the bound var (rotation-safe), no provider pool
+                # (rotation would move the session onto a different account), and hand the var
+                # name to the agent so its per-request refresh re-reads only that var.
+                from gateway.run_agent_cache import read_override_key_env
+                override_runtime["api_key"] = read_override_key_env(key_env)
+                override_runtime["credential_pool"] = None
+                override_runtime["api_key_env"] = key_env
+                logger.debug(
+                    "Session model override (key_env): session=%s override_model=%s provider=%s key_env=%s",
+                    skey or "", override_model, override_runtime.get("provider"), key_env,
+                )
+                return override_model, override_runtime
             if override_runtime.get("api_key"):
                 if override_runtime.get("credential_pool") is None:
                     override_runtime["credential_pool"] = _credential_pool_for_provider(override.get("provider"))
@@ -171,6 +185,9 @@ class GatewayTurnMixin:
         }
         runtime["args"] = list(runtime["args"] or [])
         runtime["capabilities"] = dict(runtime["capabilities"] or {})
+        if runtime_kwargs.get("api_key_env"):
+            # Alias-bound credential var; without it the agent's refresh re-resolves the provider default.
+            runtime["api_key_env"] = runtime_kwargs["api_key_env"]
         base_request_overrides = dict(runtime_kwargs.get("request_overrides") or {})
         route = {
             "model": model,

@@ -29,6 +29,22 @@ _OVERRIDE_APPLY_KEYS = (
 )
 
 
+def read_override_key_env(key_env: str) -> str:
+    """Current value of a /model alias's bound credential var (``model_aliases.<n>.key_env``).
+
+    Read through the per-profile secret scope on every resolution so a rotated ``.env`` value is
+    picked up. Raises when empty: an alias-bound session must never fall back to the provider's
+    default credential, which may belong to a different account."""
+    from agent.secret_scope import get_secret
+    value = (get_secret(key_env, "") or "").strip()
+    if not value:
+        raise RuntimeError(
+            f"this session's /model alias reads its API key from {key_env}, which is not set. "
+            f"Set {key_env} in this profile's .env, or run /model to pick another model."
+        )
+    return value
+
+
 def _first_agent(entry: Any) -> Any:
     """Unwrap a cache entry (``(agent, sig, ...)`` tuple or bare agent) to its agent."""
     return entry[0] if isinstance(entry, tuple) and entry else entry
@@ -162,13 +178,20 @@ class GatewayAgentCacheMixin:
             return
         override: Dict[str, Any] = {k: persisted.get(k) for k in ("model", "provider", "base_url")}
         provider = persisted.get("provider")
+        # Alias-bound credential: re-read the persisted var NAME, never the provider default (that
+        # key may bill a different account). _resolve_session_agent_runtime re-reads it every turn
+        # and fails loudly when it is empty.
+        key_env = (persisted.get("key_env") or "").strip()
+        if key_env:
+            override["key_env"] = key_env
         if provider:
             # Re-resolve credentials for the persisted provider. On failure (e.g. credentials removed
             # since the switch) keep the credential-less override — _resolve_session_agent_runtime
             # falls back to env resolution and layers model/provider.
             try:
                 runtime = _resolve_runtime_agent_kwargs_for_provider(provider)
-                for k in ("api_key", "api_mode", "credential_pool", "requested_provider", "max_tokens"):
+                cred_keys = () if key_env else ("api_key", "credential_pool")
+                for k in (*cred_keys, "api_mode", "requested_provider", "max_tokens"):
                     override[k] = runtime.get(k)
                 override["request_overrides"] = dict(runtime.get("request_overrides") or {})
                 override["capabilities"] = dict(runtime.get("capabilities") or {})
@@ -181,8 +204,8 @@ class GatewayAgentCacheMixin:
                 )
         self._session_state(session_key).conversation.model_override = override
         logger.info(
-            "Rehydrated persisted /model override for session=%s: model=%s provider=%s",
-            session_key, override.get("model"), provider or "",
+            "Rehydrated persisted /model override for session=%s: model=%s provider=%s key_env=%s",
+            session_key, override.get("model"), provider or "", key_env or "-",
         )
 
     def _apply_session_model_override(self, session_key: str, model: str, runtime_kwargs: dict) -> tuple:

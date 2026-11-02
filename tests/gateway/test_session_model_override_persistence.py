@@ -150,3 +150,82 @@ def test_sanitize_model_override():
         "provider": "openai",
         "base_url": "https://api.openai.example/v1",
     }
+
+
+# ── model_aliases key_env binding survives a restart ─────────────────────────
+#
+# An alias with ``key_env: X`` bills a different account than the provider
+# default. Before the fix only model/provider/base_url were persisted, so the
+# restart path re-resolved credentials BY PROVIDER and silently swapped in the
+# provider-default key (and its credential pool).
+
+ALIAS_ENV = "ALIAS_TEST_ANTHROPIC_KEY"
+ALIAS_KEY = "sk-ant-api03-alias-account-AAAA"
+DEFAULT_KEY = "sk-ant-api03-default-account-ZZZZ"
+
+ALIAS_OVERRIDE = {
+    "model": "claude-opus-5-5",
+    "provider": "anthropic",
+    "api_key": ALIAS_KEY,
+    "base_url": "https://api.anthropic.com/v1",
+    "api_mode": "anthropic_messages",
+    "key_env": ALIAS_ENV,
+}
+
+_PROVIDER_DEFAULT_RUNTIME = {
+    "api_key": DEFAULT_KEY,
+    "api_mode": "anthropic_messages",
+    "base_url": "https://api.anthropic.com",
+    "provider": "anthropic",
+    "requested_provider": "anthropic",
+    "credential_pool": object(),  # provider-default pool (seeded from ANTHROPIC_API_KEY)
+}
+
+
+def test_alias_key_env_persists_as_name_never_value(store_factory, tmp_path):
+    store = store_factory()
+    entry = store.get_or_create_session(_make_source())
+    store.set_model_override(entry.session_key, ALIAS_OVERRIDE)
+
+    raw = _sessions_json(tmp_path)
+    assert ALIAS_KEY not in raw
+    assert store_factory().get_model_override(entry.session_key)["key_env"] == ALIAS_ENV
+
+
+def test_restart_rehydrates_alias_key_not_provider_default(store_factory, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", DEFAULT_KEY)
+    monkeypatch.setenv(ALIAS_ENV, ALIAS_KEY)
+    store = store_factory()
+    session_key = store.get_or_create_session(_make_source()).session_key
+    store.set_model_override(session_key, ALIAS_OVERRIDE)
+
+    runner = _make_runner(store_factory())  # simulated restart
+    with patch("gateway.run._resolve_runtime_agent_kwargs_for_provider", return_value=_PROVIDER_DEFAULT_RUNTIME), \
+            patch("gateway.run._credential_pool_for_provider", return_value=_PROVIDER_DEFAULT_RUNTIME["credential_pool"]):
+        model, runtime = runner._resolve_session_agent_runtime(
+            session_key=session_key, user_config={"model": {"default": "global-model"}},
+        )
+        route = runner._resolve_turn_agent_config("", model, runtime)
+
+    assert model == "claude-opus-5-5"
+    assert runtime["api_key"] == ALIAS_KEY
+    assert runtime["credential_pool"] is None
+    # The binding must reach AIAgent(**route["runtime"]) or its refresh re-resolves the default.
+    assert route["runtime"]["api_key"] == ALIAS_KEY
+    assert route["runtime"]["api_key_env"] == ALIAS_ENV
+    assert route["runtime"]["credential_pool"] is None
+
+
+def test_restart_with_unset_alias_var_fails_loudly(store_factory, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", DEFAULT_KEY)
+    monkeypatch.delenv(ALIAS_ENV, raising=False)
+    store = store_factory()
+    session_key = store.get_or_create_session(_make_source()).session_key
+    store.set_model_override(session_key, ALIAS_OVERRIDE)
+
+    runner = _make_runner(store_factory())
+    with patch("gateway.run._resolve_runtime_agent_kwargs_for_provider", return_value=_PROVIDER_DEFAULT_RUNTIME), \
+            pytest.raises(RuntimeError, match=ALIAS_ENV):
+        runner._resolve_session_agent_runtime(
+            session_key=session_key, user_config={"model": {"default": "global-model"}},
+        )

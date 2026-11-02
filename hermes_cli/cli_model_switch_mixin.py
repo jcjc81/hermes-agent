@@ -21,7 +21,7 @@ from utils import base_url_host_matches
 # override and restored wholesale on rollback.
 _RUNTIME_FIELDS = (
     "model", "provider", "requested_provider", "_explicit_api_key", "_explicit_base_url",
-    "api_key", "base_url", "api_mode")
+    "api_key", "base_url", "api_mode", "_api_key_env")
 
 
 def _runtime_fields(cli) -> dict:
@@ -377,6 +377,7 @@ class CLIModelSwitchMixin:
             # _ensure_runtime_credentials for the restored one. api_key is never persisted to
             # the session DB — runtime provider resolution owns credentials.
             self._explicit_api_key = None
+            self._api_key_env = ""
             self._explicit_base_url = stored_base_url
             try:
                 from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -570,6 +571,8 @@ class CLIModelSwitchMixin:
         # (e.g. Ollama api_key/base_url) don't leak into the next resolution.
         self._explicit_api_key = result.api_key
         self._explicit_base_url = result.base_url
+        # Alias key_env binding survives agent rebuilds (/reasoning, /fast, ... set self.agent = None).
+        self._api_key_env = getattr(result, "key_env", "") or ""
         if result.api_key:
             self.api_key = result.api_key
         if result.base_url:
@@ -582,7 +585,8 @@ class CLIModelSwitchMixin:
                 self.agent.switch_model(
                     new_model=result.new_model, new_provider=result.target_provider,
                     api_key=result.api_key, base_url=result.base_url, api_mode=result.api_mode,
-                    capabilities=getattr(result, "runtime_capabilities", None))
+                    capabilities=getattr(result, "runtime_capabilities", None),
+                    api_key_env=getattr(result, "key_env", "") or "")
             except Exception as exc:
                 # The agent rolled itself back to the old working model/client. Roll the CLI's own staged
                 # fields back too and abort the rest of the commit (note + success print) so a failed switch

@@ -717,7 +717,10 @@ def _init_anthropic_client(agent, api_key, base_url, _provider_timeout):
     # must use their own key or Anthropic credentials leak to third-party endpoints.
     # Falling back would send Anthropic credentials to third-party endpoints (Fixes #1739, #minimax-401).
     _is_native_anthropic = agent.provider == "anthropic"
-    effective_key = api_key or (resolve_anthropic_token() if _is_native_anthropic else None) or ""
+    # A key bound to a named env var (model_aliases key_env) never falls back to the provider-default
+    # token chain: an empty bound var must surface as an auth error, not bill a different account.
+    _default_chain_ok = _is_native_anthropic and not getattr(agent, "_api_key_env", "")
+    effective_key = api_key or (resolve_anthropic_token() if _default_chain_ok else None) or ""
 
     # MiniMax OAuth tokens live ~15 min and the SDK freezes api_key at construction, so use a
     # callable provider: build_anthropic_client mints a fresh bearer per request (re-reading
@@ -2101,6 +2104,7 @@ def _snapshot_primary_runtime(agent):
         "base_url": agent.base_url,
         "api_mode": agent.api_mode,
         "api_key": getattr(agent, "api_key", ""),
+        "api_key_env": getattr(agent, "_api_key_env", "") or "",
         "request_overrides": dict(getattr(agent, "request_overrides", {}) or {}),
         "client_kwargs": dict(agent._client_kwargs),
         "use_prompt_caching": agent._use_prompt_caching,
@@ -2220,12 +2224,15 @@ def init_agent(
     checkpoint_max_snapshots: int = 20, checkpoint_max_total_size_mb: int = 500,
     checkpoint_max_file_size_mb: int = 10, pass_session_id: bool = False,
     requested_provider: str = None, capabilities: Optional[Dict[str, bool]] = None,
+    api_key_env: str = "",
 ):
     """Initialize the AI Agent (body of :meth:`AIAgent.__init__`).
 
     Non-obvious parameters:
       max_iterations: default unlimited (sys.maxsize); the budget is shared with subagents.
       requested_provider: provider identity before runtime canonicalization.
+      api_key_env: env var that supplied ``api_key`` (a ``model_aliases`` ``key_env``). Credential
+        refresh re-reads only this var, never the provider-default token chain.
       openrouter_min_coding_score: coding-score floor for ``openrouter/pareto-code`` only.
       clarify_callback: ``(question, choices) -> str``; None → the clarify tool errors.
       reasoning_config: None → ``{"enabled": True, "effort": "medium"}`` on OpenRouter.
@@ -2265,6 +2272,10 @@ def init_agent(
         if isinstance(key, str) and isinstance(value, bool)
     }
     agent._credential_pool = credential_pool
+    agent._api_key_env = (api_key_env or "").strip()
+    if agent._api_key_env and credential_pool is not None:
+        # Alias-bound credential: provider pool rotation would swap in a different account's key.
+        agent._credential_pool = credential_pool = None
     agent.acp_command = acp_command or command
     agent.acp_args = list(acp_args or args or [])
     _resolve_api_mode(agent, api_mode, provider_name, base_url)
