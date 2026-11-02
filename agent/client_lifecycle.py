@@ -827,9 +827,13 @@ class ClientLifecycleMixin:
         old_token = self._anthropic_api_key
         self._anthropic_api_key, self._is_anthropic_oauth = new_token, self._anthropic_oauth_flag(new_token)
         if key_env:
-            # Rotated alias key: auxiliary calls (compression, titles) read agent.api_key — move it too.
+            # Rotated alias key: auxiliary calls read agent.api_key (titles, vision) and the compressor's
+            # own copy (compression) — move both, or aux calls keep sending the revoked key.
             if getattr(self, "api_key", None) == old_token:
                 self.api_key = new_token
+            compressor = getattr(self, "context_compressor", None)
+            if compressor is not None and getattr(compressor, "api_key", None) == old_token:
+                compressor.api_key = new_token
             logger.info("Anthropic credential refreshed from %s (rotated value)", key_env)
         return True
 

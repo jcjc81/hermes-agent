@@ -77,6 +77,7 @@ class TestPerRequestRefresh:
     def test_refresh_picks_up_rotated_alias_key(self, both_keys, monkeypatch):
         """Rotation still works: a new value in the BOUND var rebuilds the client with it."""
         agent = _native_anthropic_agent(key_env=ALIAS_ENV)
+        agent.context_compressor = MagicMock(api_key=ALIAS_KEY)
         monkeypatch.setenv(ALIAS_ENV, ALIAS_KEY_ROTATED)
         new_client = MagicMock(name="RotatedClient")
 
@@ -85,7 +86,8 @@ class TestPerRequestRefresh:
 
         assert refreshed is True
         assert agent._anthropic_api_key == ALIAS_KEY_ROTATED
-        assert agent.api_key == ALIAS_KEY_ROTATED  # auxiliary calls (compression, titles) follow
+        assert agent.api_key == ALIAS_KEY_ROTATED  # auxiliary calls (titles, vision) follow
+        assert agent.context_compressor.api_key == ALIAS_KEY_ROTATED  # compression's own copy follows
         assert agent._anthropic_client is new_client
         assert rebuild.call_args.args[0] == ALIAS_KEY_ROTATED
 

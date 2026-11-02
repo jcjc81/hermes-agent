@@ -6835,6 +6835,24 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
     return None
 
 
+def _is_alias_bound_credential(api_key: Any) -> bool:
+    """True when ``api_key`` is the credential a ``model_aliases`` entry declares (``key_env`` /
+    ``api_key``) in the active profile. Matched by value: aux calls carry the session's key, not the
+    alias name. Only consulted on the failure path."""
+    if not isinstance(api_key, str) or not api_key.strip():
+        return False
+    try:
+        from hermes_cli.model_switch import DIRECT_ALIASES, _ensure_direct_aliases, direct_alias_api_key
+        _ensure_direct_aliases()
+        return any(
+            (alias.api_key or alias.key_env) and direct_alias_api_key(alias) == api_key.strip()
+            for alias in list(DIRECT_ALIASES.values())
+        )
+    except Exception:
+        logger.debug("model_aliases credential lookup failed", exc_info=True)
+        return False
+
+
 def _aux_recovery_ladder(
     first_err: Exception, *, client: Any, kwargs: Dict[str, Any], task: Optional[str],
     async_mode: bool, base_info: str, resolved_provider: str, resolved_model: Optional[str],
@@ -6858,12 +6876,19 @@ def _aux_recovery_ladder(
     resp, first_err = yield from _ladder_nous_rungs(first_err, route, kwargs, client_is_nous)
     if first_err is None:
         return resp
-    resp, first_err = yield from _ladder_credential_rungs(first_err, route, kwargs, client_is_nous)
-    if first_err is None:
-        return resp
-    resp = yield from _ladder_provider_fallback(first_err, route)
-    if resp is not None:
-        return resp
+    if _is_alias_bound_credential(getattr(client, "api_key", None)):
+        # A model_aliases credential selects a specific account. Credential refresh, pool rotation and
+        # provider fallback all re-resolve the provider WITHOUT that key, i.e. with the provider-default
+        # credential — a different account, billed silently. Surface the failure instead.
+        logger.warning("Auxiliary %s%s: request on a model_aliases credential failed (%s); not retrying "
+                       "with another credential or provider", task or "call", tag, type(first_err).__name__)
+    else:
+        resp, first_err = yield from _ladder_credential_rungs(first_err, route, kwargs, client_is_nous)
+        if first_err is None:
+            return resp
+        resp = yield from _ladder_provider_fallback(first_err, route)
+        if resp is not None:
+            return resp
     # Connection/timeout errors poison the cached client (closed transport, half-read
     # stream); evict so the next aux call rebuilds a fresh one.
     # Drop it from the cache regardless of whether we found a fallback above so the next auxiliary call
