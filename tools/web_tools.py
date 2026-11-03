@@ -377,12 +377,16 @@ def web_search_tool(query: str, limit: int = 5) -> str:
                     if fallback_name == provider.name:
                         continue
                     fallback = _wsp_get_provider2(fallback_name)
-                    if not fallback or not fallback.supports_search():
+                    if not fallback or not fallback.supports_search() or not _walk_may_use(fallback):
                         continue
                     logger.info(
                         "Web search fallback: trying '%s'", fallback_name,
                     )
-                    fallback_data = fallback.search(query, limit)
+                    try:
+                        fallback_data = fallback.search(query, limit)
+                    except Exception as exc:  # providers raise pre-flight errors by design (e.g. firecrawl unconfigured)
+                        logger.warning("Web search fallback '%s' raised: %s", fallback_name, exc, exc_info=True)
+                        continue
                     if not fallback_data.get("success", True):
                         logger.warning(
                             "Web search fallback '%s' also failed: %s",
@@ -413,6 +417,21 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         return result_json
     except Exception as e:
         return _finish_debug("web_search_tool", debug_call_data, f"Error searching web: {e!s}")
+
+
+def _walk_may_use(provider) -> bool:
+    """LOCAL PATCH: may the empty/failed-search fallback walk call *provider*? Never the billed Nous gateway
+    (upstream's _managed_search_fallback owns that hop, managed search only), and the anonymous keyless ring
+    only when ``web.keyless_rescue`` allows it (upstream's switch for keyless fallback calls)."""
+    from plugins.web._common import BaseWebSearchProvider
+    from tools.web_tools_rescue import _keyless_rescue_enabled, _ring_vendor_keyless
+    if provider.name == "firecrawl":
+        from plugins.web.firecrawl.provider import is_managed_route
+        if is_managed_route("search"):
+            return False
+    if isinstance(provider, BaseWebSearchProvider) and provider.KEYLESS and _ring_vendor_keyless(provider.name):
+        return _keyless_rescue_enabled()
+    return True
 
 
 def _memoized_search(provider, query: str, limit: int) -> dict:

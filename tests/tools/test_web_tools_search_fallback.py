@@ -243,3 +243,28 @@ class TestAllFallbacksExhausted:
 
         assert data["success"] is False
         assert data["error"] == "primary boom"
+
+
+class TestFallbackRaises:
+    """A fallback that raises (providers raise pre-flight errors by design, e.g. an unconfigured
+    firecrawl) is skipped like a failed one: it must neither end the walk nor replace the response."""
+
+    def test_raising_fallback_does_not_end_the_walk(self):
+        searxng, _ = _make_provider("searxng", results=[])
+        brave, brave_calls = _make_provider("brave-free", results=[_result("brave hit")])
+
+        class _Raising(type(searxng)):
+            @property
+            def name(self) -> str:
+                return "ddgs"
+
+            def search(self, query: str, limit: int = 5):
+                raise ValueError("ddgs pre-flight: not configured")
+
+        registry = {"searxng": searxng, "ddgs": _Raising(), "brave-free": brave}
+        with patch("agent.web_search_registry._FALLBACK_PREFERENCE", ("searxng", "ddgs", "brave-free")):
+            data = _run_search_tool("searxng", registry)
+
+        assert data["success"] is True
+        assert data["data"]["web"] == [_result("brave hit")]
+        assert len(brave_calls) == 1
