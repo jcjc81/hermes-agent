@@ -1,4 +1,6 @@
-"""An auxiliary call (compression, titles, ...) that fails on a ``model_aliases`` credential must never
+"""LOCAL PATCH tests (live commit 09dc1e127b; implementation in agent/auxiliary_alias_credential.py).
+
+An auxiliary call (compression, titles, ...) that fails on a ``model_aliases`` credential must never
 be retried with a different credential.
 
 A ``model_aliases`` entry with its own key (``key_env`` / ``api_key``) selects a specific account, e.g.
@@ -14,6 +16,7 @@ ALIAS_ENV = "ALIAS_TEST_ANTHROPIC_KEY"
 ALIAS_KEY = "sk-ant-api03-alias-AAAA"
 DEFAULT_KEY = "sk-ant-api03-default-ZZZZ"
 _ERRORS = {401: "invalid x-api-key", 429: "rate_limit_error: too many requests"}
+OTHER_ACCOUNT_TOKEN = "sk-ant-oat01-" + "Q" * 20 + "TTTT"  # a second account's credential in the provider pool
 
 
 class _StatusError(Exception):
@@ -25,9 +28,9 @@ class _StatusError(Exception):
 @pytest.fixture
 def anthropic_wire(monkeypatch, tmp_path):
     """Native-Anthropic aux route whose every request fails with ``wire.status``; records keys sent."""
-    import agent.anthropic_adapter as anthropic_adapter
+    from agent import anthropic_adapter
     import agent.auxiliary_client as aux
-    import hermes_cli.model_switch as model_switch
+    from hermes_cli import model_switch
 
     hermes_home = tmp_path / "hermes_home"
     hermes_home.mkdir(exist_ok=True)
@@ -80,21 +83,37 @@ def _compress_on(api_key: str):
              messages=[{"role": "user", "content": "summarise"}], max_tokens=16)
 
 
+def _pool_statuses() -> list:
+    from agent.credential_pool import load_pool
+    return [entry.last_status for entry in load_pool("anthropic").entries()]
+
+
+@pytest.mark.parametrize("other_account_in_pool", [False, True])
 @pytest.mark.parametrize("status", [401, 429])
-def test_alias_credential_failure_is_never_retried_with_another_key(anthropic_wire, status):
+def test_alias_credential_failure_is_never_retried_with_another_key(anthropic_wire, monkeypatch, status,
+                                                                     other_account_in_pool):
+    """One request on the alias key, then the error surfaces: no retry, no pool rotation, and no other
+    credential's pool state touched (with a second account's token in the provider pool, upstream's ladder
+    without the guard rotates onto it and marks it exhausted)."""
+    if other_account_in_pool:
+        monkeypatch.setenv("ANTHROPIC_TOKEN", OTHER_ACCOUNT_TOKEN)
     anthropic_wire.status = status
     with pytest.raises(_StatusError) as excinfo:
         _compress_on(ALIAS_KEY)
     assert excinfo.value.status_code == status
-    assert anthropic_wire.sent, "the aux call must reach the alias endpoint"
-    assert set(anthropic_wire.sent) == {ALIAS_KEY}, (
-        f"recovery after HTTP {status} sent a different credential: "
+    assert anthropic_wire.sent == [ALIAS_KEY], (
+        f"recovery after HTTP {status} re-sent or switched credential: "
         f"{[k[-4:] for k in anthropic_wire.sent]} (alias key ends AAAA)")
+    assert all(s in (None, "ok") for s in _pool_statuses()), "an alias failure must not mark provider-pool credentials"
 
 
-def test_non_alias_credential_keeps_auth_refresh_recovery(anthropic_wire):
-    """The guard is scoped to alias credentials: a provider-default key still gets the 401 refresh retry."""
+def test_non_alias_credential_keeps_recovery_ladder(anthropic_wire, monkeypatch):
+    """The guard is scoped to alias credentials: a provider-default key still enters the recovery ladder.
+    Upstream no longer refreshes a plain API key on a 401 (bdf45abd7c4 binds the refresh to the failed
+    request's own credential), so credential-pool rotation is the rung that shows the ladder still runs."""
+    monkeypatch.setenv("ANTHROPIC_TOKEN", OTHER_ACCOUNT_TOKEN)
     anthropic_wire.status = 401
     with pytest.raises(_StatusError):
         _compress_on(DEFAULT_KEY)
-    assert len(anthropic_wire.sent) >= 2, "a 401 on a non-alias key must still be retried after a credential refresh"
+    assert len(anthropic_wire.sent) >= 2, "a 401 on a non-alias key must still be retried by the recovery ladder"
+    assert any(s not in (None, "ok") for s in _pool_statuses()), "pool rotation must have marked the failed entry"

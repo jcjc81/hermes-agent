@@ -82,15 +82,6 @@ def fingerprint_secret_value(value: Any) -> str | None:
     return f"sha256:{digest[:16]}"
 
 
-def fingerprint_secret_value(value: Any) -> str | None:
-    """Public, non-reversible fingerprint for a single secret value.
-
-    Callers that compare a live secret against the ``secret_fingerprint`` left
-    on a sanitized (borrowed) pool row need the same digest this module writes.
-    """
-    return _fingerprint_value(value)
-
-
 def _credential_secret_fingerprint(payload: Mapping[str, Any]) -> str | None:
     preferred = ("agent_key", "access_token", "refresh_token", "api_key", "token", "secret")
     candidates = [payload.get(k) for k in preferred]
@@ -108,7 +99,7 @@ def _credential_secret_fingerprint(payload: Mapping[str, Any]) -> str | None:
 def sanitize_borrowed_credential_payload(
     payload: Mapping[str, Any],
     provider_id: Any = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Return a disk-safe credential-pool payload.
 
     Owned sources pass through unchanged.  Borrowed sources keep labels,

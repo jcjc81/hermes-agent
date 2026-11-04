@@ -15,6 +15,10 @@ import pytest
 
 from plugins.web.trafilatura.provider import TrafilaturaExtractProvider
 
+# The SSRF guard resolves each hostname before fetching. Upstream's test fence (tests/conftest.py, c8f33501d6)
+# refuses lookups of external hosts, so serve the guard's lookup from upstream's public_dns fixture.
+pytestmark = pytest.mark.usefixtures("public_dns")
+
 
 def _make_response(
     status_code=200,

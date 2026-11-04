@@ -141,6 +141,109 @@ def test_runner_rehydrates_override_after_restart(store_factory):
     assert route["runtime"]["capabilities"] == {"openai_native_compaction": True}
 
 
+def test_rehydrate_llamacpp_override_follows_live_managed_port(store_factory):
+    """The managed llama.cpp supervisor may come back on an ephemeral port (18434 busy). The persisted
+    loopback URL is a snapshot of the previous boot, so rehydration must take the live endpoint."""
+    store = store_factory()
+    session_key = store.get_or_create_session(_make_source()).session_key
+    store.set_model_override(session_key, {
+        "model": "Local.Model-Q4_K_M", "provider": "llamacpp", "base_url": "http://127.0.0.1:51489/v1"})
+
+    runner = _make_runner(store_factory())
+    with patch(
+        "gateway.run._resolve_runtime_agent_kwargs_for_provider",
+        return_value={"api_key": "local-key", "base_url": "http://127.0.0.1:18434/v1",
+                      "provider": "custom", "requested_provider": "llamacpp"},
+    ):
+        runner._rehydrate_session_model_override(session_key)
+
+    override = runner._session_model_overrides[session_key]
+    assert override["base_url"] == "http://127.0.0.1:18434/v1"
+    assert override["api_key"] == "local-key"
+
+
+def test_rehydrate_opencode_override_heals_relay_url_for_rederived_wire(store_factory):
+    """api_mode is re-resolved from the target model, so a relay URL persisted by an older build for the
+    previous wire (/v1-stripped for anthropic_messages) must be healed to match, not kept verbatim (#96066)."""
+    store = store_factory()
+    session_key = store.get_or_create_session(_make_source()).session_key
+    store.set_model_override(session_key, {
+        "model": "deepseek-v4-flash-vision-exp", "provider": "opencode-go", "base_url": "https://opencode.ai/zen/go"})
+
+    runner = _make_runner(store_factory())
+    with patch(
+        "gateway.run._resolve_runtime_agent_kwargs_for_provider",
+        return_value={"api_key": "go-key", "api_mode": "chat_completions",
+                      "base_url": "https://opencode.ai/zen/go/v1", "provider": "opencode-go"},
+    ):
+        runner._rehydrate_session_model_override(session_key)
+
+    override = runner._session_model_overrides[session_key]
+    assert (override["api_mode"], override["base_url"]) == ("chat_completions", "https://opencode.ai/zen/go/v1")
+
+
+@pytest.mark.parametrize("codex_on_turn", ["recovers", "still_unavailable"])
+def test_codex_override_never_runs_on_the_default_providers_endpoint(store_factory, codex_on_turn):
+    """A persisted openai-codex override whose credentials fail to re-resolve used to be layered over the
+    DEFAULT provider's runtime (Nous URL + Nous key + chat_completions). The turn runs on ONE coherent
+    route: the override's own provider when it resolves, else the whole default route with a notice."""
+    store = store_factory()
+    session_key = store.get_or_create_session(_make_source()).session_key
+    store.set_model_override(session_key, {"model": "gpt-6-luna-900k", "provider": "openai-codex",
+                                           "base_url": "https://inference-api.nousresearch.com/v1"})
+    runner = _make_runner(store_factory())
+    codex = {"provider": "openai-codex", "api_key": "codex-tok", "api_mode": "codex_responses",
+             "base_url": "https://chatgpt.com/backend-api/codex"}
+    nous = {"provider": "nous", "api_key": "nous-key", "api_mode": "chat_completions",
+            "base_url": "https://inference-api.nousresearch.com/v1"}
+    calls = iter([RuntimeError("refresh blip"), codex if codex_on_turn == "recovers" else RuntimeError("gone")])
+
+    def _for_provider(provider, target_model=None):
+        assert provider == "openai-codex"
+        nxt = next(calls)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return dict(nxt)
+
+    with patch("gateway.run._resolve_runtime_agent_kwargs_for_provider", side_effect=_for_provider), \
+         patch("gateway.run._resolve_runtime_agent_kwargs", return_value=dict(nous)):
+        model, runtime = runner._resolve_session_agent_runtime(
+            session_key=session_key, user_config={"model": {"default": "openai/gpt-6-luna", "provider": "nous"}})
+
+    expected_model, expected = ("gpt-6-luna-900k", codex) if codex_on_turn == "recovers" else ("openai/gpt-6-luna", nous)
+    assert (model, {k: runtime[k] for k in expected}) == (expected_model, expected)
+    assert bool(runner._pre_agent_fallback_notice) is (codex_on_turn == "still_unavailable")
+
+
+def test_alias_key_env_override_survives_restart_on_its_own_key(store_factory, tmp_path, monkeypatch):
+    """A ``model_aliases`` pick with ``key_env`` persists the variable NAME (never its value); after a
+    restart the turn sends that variable's key with no provider pool, and hands the name to the agent so
+    its per-request refresh re-reads it. Re-resolving by provider bills ANTHROPIC_API_KEY's account."""
+    alias_key, default_key = "sk-ant-api03-alias-account-AAAA", "sk-ant-api03-default-account-ZZZZ"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", default_key)
+    monkeypatch.setenv("ANTHROPIC_API_KEY_ALT", alias_key)
+    store = store_factory()
+    session_key = store.get_or_create_session(_make_source()).session_key
+    store.set_model_override(session_key, {
+        "model": "claude-opus-5-5", "provider": "anthropic", "base_url": "https://api.anthropic.com/v1",
+        "api_key": alias_key, "api_mode": "anthropic_messages", "key_env": "ANTHROPIC_API_KEY_ALT"})
+    assert alias_key not in _sessions_json(tmp_path)
+
+    default_pool = object()
+    default_runtime = {"provider": "anthropic", "api_key": default_key, "api_mode": "anthropic_messages",
+                       "base_url": "https://api.anthropic.com", "credential_pool": default_pool}
+    runner = _make_runner(store_factory())  # simulated restart
+    with patch("gateway.run._resolve_runtime_agent_kwargs_for_provider", return_value=dict(default_runtime)), \
+         patch("gateway.run._credential_pool_for_provider", return_value=default_pool):
+        model, runtime = runner._resolve_session_agent_runtime(
+            session_key=session_key, user_config={"model": {"default": "global-model"}})
+        agent_kwargs = runner._resolve_turn_agent_config("", model, runtime)["runtime"]
+
+    assert model == "claude-opus-5-5"
+    assert (agent_kwargs["api_key"], agent_kwargs["credential_pool"], agent_kwargs.get("api_key_env")) == (
+        alias_key, None, "ANTHROPIC_API_KEY_ALT")
+
+
 def test_sanitize_model_override():
     assert sanitize_model_override(None) is None
     assert sanitize_model_override({}) is None
@@ -150,82 +253,3 @@ def test_sanitize_model_override():
         "provider": "openai",
         "base_url": "https://api.openai.example/v1",
     }
-
-
-# ── model_aliases key_env binding survives a restart ─────────────────────────
-#
-# An alias with ``key_env: X`` bills a different account than the provider
-# default. Before the fix only model/provider/base_url were persisted, so the
-# restart path re-resolved credentials BY PROVIDER and silently swapped in the
-# provider-default key (and its credential pool).
-
-ALIAS_ENV = "ALIAS_TEST_ANTHROPIC_KEY"
-ALIAS_KEY = "sk-ant-api03-alias-account-AAAA"
-DEFAULT_KEY = "sk-ant-api03-default-account-ZZZZ"
-
-ALIAS_OVERRIDE = {
-    "model": "claude-opus-5-5",
-    "provider": "anthropic",
-    "api_key": ALIAS_KEY,
-    "base_url": "https://api.anthropic.com/v1",
-    "api_mode": "anthropic_messages",
-    "key_env": ALIAS_ENV,
-}
-
-_PROVIDER_DEFAULT_RUNTIME = {
-    "api_key": DEFAULT_KEY,
-    "api_mode": "anthropic_messages",
-    "base_url": "https://api.anthropic.com",
-    "provider": "anthropic",
-    "requested_provider": "anthropic",
-    "credential_pool": object(),  # provider-default pool (seeded from ANTHROPIC_API_KEY)
-}
-
-
-def test_alias_key_env_persists_as_name_never_value(store_factory, tmp_path):
-    store = store_factory()
-    entry = store.get_or_create_session(_make_source())
-    store.set_model_override(entry.session_key, ALIAS_OVERRIDE)
-
-    raw = _sessions_json(tmp_path)
-    assert ALIAS_KEY not in raw
-    assert store_factory().get_model_override(entry.session_key)["key_env"] == ALIAS_ENV
-
-
-def test_restart_rehydrates_alias_key_not_provider_default(store_factory, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", DEFAULT_KEY)
-    monkeypatch.setenv(ALIAS_ENV, ALIAS_KEY)
-    store = store_factory()
-    session_key = store.get_or_create_session(_make_source()).session_key
-    store.set_model_override(session_key, ALIAS_OVERRIDE)
-
-    runner = _make_runner(store_factory())  # simulated restart
-    with patch("gateway.run._resolve_runtime_agent_kwargs_for_provider", return_value=_PROVIDER_DEFAULT_RUNTIME), \
-            patch("gateway.run._credential_pool_for_provider", return_value=_PROVIDER_DEFAULT_RUNTIME["credential_pool"]):
-        model, runtime = runner._resolve_session_agent_runtime(
-            session_key=session_key, user_config={"model": {"default": "global-model"}},
-        )
-        route = runner._resolve_turn_agent_config("", model, runtime)
-
-    assert model == "claude-opus-5-5"
-    assert runtime["api_key"] == ALIAS_KEY
-    assert runtime["credential_pool"] is None
-    # The binding must reach AIAgent(**route["runtime"]) or its refresh re-resolves the default.
-    assert route["runtime"]["api_key"] == ALIAS_KEY
-    assert route["runtime"]["api_key_env"] == ALIAS_ENV
-    assert route["runtime"]["credential_pool"] is None
-
-
-def test_restart_with_unset_alias_var_fails_loudly(store_factory, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", DEFAULT_KEY)
-    monkeypatch.delenv(ALIAS_ENV, raising=False)
-    store = store_factory()
-    session_key = store.get_or_create_session(_make_source()).session_key
-    store.set_model_override(session_key, ALIAS_OVERRIDE)
-
-    runner = _make_runner(store_factory())
-    with patch("gateway.run._resolve_runtime_agent_kwargs_for_provider", return_value=_PROVIDER_DEFAULT_RUNTIME), \
-            pytest.raises(RuntimeError, match=ALIAS_ENV):
-        runner._resolve_session_agent_runtime(
-            session_key=session_key, user_config={"model": {"default": "global-model"}},
-        )

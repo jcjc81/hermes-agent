@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -78,7 +78,7 @@ def _is_block_page(text: str) -> bool:
     return False
 
 
-def _has_structured_signal(result: Dict[str, Any]) -> bool:
+def _has_structured_signal(result: dict[str, Any]) -> bool:
     """Check if the extracted result carries title/metadata signal."""
     title = result.get("title", "")
     metadata = result.get("metadata")
@@ -105,8 +105,8 @@ class TrafilaturaExtractProvider(WebSearchProvider):
     def is_available(self) -> bool:
         """Return True when trafilatura is importable."""
         try:
-            import trafilatura  # noqa: F401
-            import httpx  # noqa: F401
+            import trafilatura
+            import httpx
             return True
         except ImportError:
             return False
@@ -117,7 +117,7 @@ class TrafilaturaExtractProvider(WebSearchProvider):
     def supports_extract(self) -> bool:
         return True
 
-    def extract(self, urls: List[str], **kwargs: Any) -> List[Dict[str, Any]]:
+    def extract(self, urls: list[str], **kwargs: Any) -> list[dict[str, Any]]:
         """Extract content from URLs using Trafilatura.
 
         Returns one entry per input URL in order. Each entry has:
@@ -129,7 +129,7 @@ class TrafilaturaExtractProvider(WebSearchProvider):
         """
         is_safe_url, check_website_access = _load_safety_tools()
 
-        results: List[Dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
 
         for requested_url in urls:
             result = self._extract_single(
@@ -144,7 +144,7 @@ class TrafilaturaExtractProvider(WebSearchProvider):
         url: str,
         is_safe_url,
         check_website_access,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Extract a single URL. Returns result dict with requested URL echoed."""
 
         # Pre-fetch policy gate

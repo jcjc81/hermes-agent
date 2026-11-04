@@ -16,7 +16,7 @@ Covers the degradation path in ``tools.web_tools.web_search_tool``:
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -28,7 +28,7 @@ from agent.web_search_provider import WebSearchProvider
 def _make_provider(
     name: str,
     *,
-    results: List[Dict[str, Any]] | None = None,
+    results: list[dict[str, Any]] | None = None,
     error: str | None = None,
     available: bool = True,
 ):
@@ -37,7 +37,7 @@ def _make_provider(
     Returns ``(provider, calls)`` — ``calls`` collects every query the
     dispatcher routed to this provider.
     """
-    calls: List[str] = []
+    calls: list[str] = []
 
     class _Fake(WebSearchProvider):
         @property
@@ -54,7 +54,7 @@ def _make_provider(
         def supports_search(self) -> bool:
             return True
 
-        def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
+        def search(self, query: str, limit: int = 5) -> dict[str, Any]:
             calls.append(query)
             if error is not None:
                 return {"success": False, "error": error}
@@ -63,11 +63,11 @@ def _make_provider(
     return _Fake(), calls
 
 
-def _result(title: str) -> Dict[str, Any]:
+def _result(title: str) -> dict[str, Any]:
     return {"title": title, "url": "https://example.com", "description": "", "position": 1}
 
 
-def _run_search_tool(primary_name: str, registry: Dict[str, Any]) -> Dict[str, Any]:
+def _run_search_tool(primary_name: str, registry: dict[str, Any]) -> dict[str, Any]:
     """Call web_search_tool with the registry fully mocked.
 
     Mocks the keyless rescue to be disabled so the one-shot rescue path is
@@ -87,7 +87,7 @@ class TestSearchFallbackTrigger:
     """Both hard errors and success-with-zero-results trigger the walk."""
 
     def test_empty_results_trigger_fallback(self):
-        searxng, searxng_calls = _make_provider("searxng", results=[])
+        searxng, _searxng_calls = _make_provider("searxng", results=[])
         brave, brave_calls = _make_provider("brave-free", results=[_result("brave hit")])
         registry = {"searxng": searxng, "brave-free": brave}
 
@@ -243,3 +243,28 @@ class TestAllFallbacksExhausted:
 
         assert data["success"] is False
         assert data["error"] == "primary boom"
+
+
+class TestFallbackRaises:
+    """A fallback that raises (providers raise pre-flight errors by design, e.g. an unconfigured
+    firecrawl) is skipped like a failed one: it must neither end the walk nor replace the response."""
+
+    def test_raising_fallback_does_not_end_the_walk(self):
+        searxng, _ = _make_provider("searxng", results=[])
+        brave, brave_calls = _make_provider("brave-free", results=[_result("brave hit")])
+
+        class _Raising(type(searxng)):
+            @property
+            def name(self) -> str:
+                return "ddgs"
+
+            def search(self, query: str, limit: int = 5):
+                raise ValueError("ddgs pre-flight: not configured")
+
+        registry = {"searxng": searxng, "ddgs": _Raising(), "brave-free": brave}
+        with patch("agent.web_search_registry._FALLBACK_PREFERENCE", ("searxng", "ddgs", "brave-free")):
+            data = _run_search_tool("searxng", registry)
+
+        assert data["success"] is True
+        assert data["data"]["web"] == [_result("brave hit")]
+        assert len(brave_calls) == 1

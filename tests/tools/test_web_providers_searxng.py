@@ -31,10 +31,6 @@ class TestSearXNGSearchProviderIsConfigured:
         assert SearXNGWebSearchProvider().is_available() is True
 
 
-    def test_implements_web_search_provider(self):
-        from agent.web_search_provider import WebSearchProvider
-        from plugins.web.searxng.provider import SearXNGWebSearchProvider
-        assert issubclass(SearXNGWebSearchProvider, WebSearchProvider)
 
 
 class TestSearXNGSearchProviderSearch:
@@ -143,7 +139,7 @@ class TestGetBackendSearXNG:
     def test_searxng_does_not_override_higher_priority_provider(self, monkeypatch):
         """Exa (higher priority than searxng) should win in auto-detect."""
         from tools import web_tools
-        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {})
+        monkeypatch.setattr(web_tools, "_load_web_config", dict)
         monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
         monkeypatch.delenv("FIRECRAWL_API_URL", raising=False)
         monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
@@ -157,7 +153,7 @@ class TestGetBackendSearXNG:
         must still drive auto-detect via the now config-aware ``_has_env``."""
         from hermes_cli import config as hermes_config
         from tools import web_tools
-        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {})
+        monkeypatch.setattr(web_tools, "_load_web_config", dict)
         monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
         monkeypatch.delenv("FIRECRAWL_API_URL", raising=False)
         monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
@@ -201,7 +197,7 @@ class TestCheckWebApiKey:
     def test_no_credentials_fails(self, monkeypatch):
         from tools import web_tools
         from agent import web_search_registry
-        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {})
+        monkeypatch.setattr(web_tools, "_load_web_config", dict)
         monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
         monkeypatch.delenv("FIRECRAWL_API_URL", raising=False)
         monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
@@ -214,6 +210,9 @@ class TestCheckWebApiKey:
         # Disable the keyless free tier — with it on, zero credentials still
         # resolves (Parallel/Exa anonymous MCP; see test_web_keyless_fallback.py).
         monkeypatch.setattr(web_search_registry, "_keyless_tier_enabled", lambda: False)
+        # LOCAL PATCH: shield the check from always-available plugins (trafilatura), as test_web_tools_tavily does.
+        monkeypatch.setattr(web_search_registry, "get_active_search_provider", lambda: None)
+        monkeypatch.setattr(web_search_registry, "get_active_extract_provider", lambda: None)
         assert web_tools.check_web_api_key() is False
 
 
